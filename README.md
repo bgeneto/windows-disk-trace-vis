@@ -37,7 +37,7 @@ After this, the trace will start automatically at the early stage of the next (r
    ```
 
 Now you can upload the (compressed) `.csv` file to this page. The page script &mdash; written in Python{python_svg}using Pandas{pandas_svg} &mdash; will analyze the single trace record using the provided
-[profile](http://diskio.wpaProfile) and show you the results in tabular and graphical formats.
+[profile](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile) and show you the results in tabular and graphical formats.
 > **Note:** tested with WPR v10.0.25931.1000 on Windows 11 Pro version 22H2.
 
 # About WPR 
