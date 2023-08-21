@@ -1,0 +1,5 @@
+babel
+pandas
+plotly
+plotly-express
+streamlit
