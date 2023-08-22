@@ -13,6 +13,9 @@ All this info is valuable for understanding where the performance of your disk/s
 
 # Usage 
 
+The webapp is hosted [here](https://windows-disk-trace-vis.streamlit.app). You will need my custom
+[profile](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile) to convert the trace log to csv format. 
+
 First, you need to record a trace of your 'Disk I/O activity' with WPRUI.exe. You can trace your Windows boot process or a specific application/workload.
 Then you need to convert the saved `.etl` file to a `.csv` file using the `wpaexporter.exe` tool that comes with [Windows ADK](https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install).
 The `wpaexporter.exe` tool is typically located in the `C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit` folder, an example usage follows:
