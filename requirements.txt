@@ -1,4 +1,3 @@
-babel
 pandas
 plotly
 plotly-express

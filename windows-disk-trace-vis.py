@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-"""Event Trace Log IO Parser.
+"""Windows Disk Trace Visualizer.
 
-This script performs trace analysis of a single trace and profile recorded with Windows Performance Recorder (or Xperf).
+A simple but useful web application designed to streamline the process of analyzing Event Trace Log (ETL) files,
+specifically focusing on Disk I/O activities recorded by Windows Performance Recorder (or Xperf).
 
 Author:   b g e n e t o @ g m a i l . c o m
 History:  v1.0.0 Initial release
           v1.0.1 Updated profile link
-Modified: 20230821
+          v1.0.2 Removed babel dependency and added locale_adjust_numbers function (faster)
+                 Added custom profile download button
+Modified: 20230822
 Usage:
-    $ streamlit run etl-io-parser.py
+    $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.1"
+__VERSION__ = "1.0.2"
 
 import base64
+import urllib.error
+import urllib.request
 from timeit import default_timer as timer
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from babel.numbers import parse_decimal, parse_number
 
 app_title = "Windows Disk Trace Visualizer"
 
@@ -69,29 +74,29 @@ pandas_svg = """
 """
 
 usage = """
-[YouTube video tutorial](https://youtu.be/XgtjpdunUoI)
+[YouTube Quick Tutorial](https://youtu.be/XgtjpdunUoI)
 
 First, you need to record a trace of your 'Disk I/O activity' with WPRUI.exe. You can trace your Windows boot process or a specific application/workload.
 Then you need to convert the saved `.etl` file to a `.csv` file using the `wpaexporter.exe` tool that comes with [Windows ADK](https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install).
-The `wpaexporter.exe` tool is typically located in the `C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit` folder, an example usage follows:
+The `wpaexporter.exe` tool is typically located in the `C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit` folder. An example of usage follows:
 ```cmd
-> wpaexporter.exe -i boottrace.etl -profile DiskIO.wpaProfile -delimiter ;
+wpaexporter.exe -i boottrace.etl -profile DiskIO.wpaProfile -delimiter ;
 ```
 
-You can also trace your boot process as follows:
+If you want to trace your boot process do as follows:
 
-- Open an elevated command prompt and run:
+- Open an elevated command prompt and run (change the path to your desired location):
 
    ```
-   > wpr -addboot GeneralProfile.Light -filemode -recordtempto D:\\Temp
+   wpr -addboot GeneralProfile.Light -filemode -recordtempto D:\\Temp
    ```
 
 After this, the trace will start automatically at the early stage of the next (re)boot.
 
-- The command syntax to save the boot trace (.etl file) is the following:
+- The command syntax to save the boot trace (.etl file) &mdash; after boot completion &mdash; is the following:
 
    ```
-   > wpr -stopboot D:\\Temp\\boottrace.etl
+   wpr -stopboot D:\\Temp\\boottrace.etl
    ```
 
 Now you can upload the (compressed) `.csv` file to this page. The page script &mdash; written in Python{python_svg}using Pandas{pandas_svg} &mdash; will analyze the single trace record using the provided
@@ -107,6 +112,41 @@ def render_svg(svg, width="100%", height="100%") -> str:
         rf'<img width={width} height={height} src="data:image/svg+xml;base64,{b64}"/>'
     )
     return html
+
+
+def locale_adjust_numbers(data: pd.DataFrame) -> pd.DataFrame:
+    """Check number format and adjust data accordingly."""
+    int_cols = ["Size (B)"]
+    float_cols = [
+        "Init Time (s)",
+        "Complete Time (s)",
+        "Disk Service Time (µs)",
+        "IO Time (µs)",
+    ]
+
+    # remove spaces, dots and commas from integer columns
+    for col in int_cols:
+        data[col] = (
+            data[col].str.replace(" ", "").str.replace(".", "").str.replace(",", "")
+        ).astype(int)
+
+    # locale aware format float columns
+    if data["Init Time (s)"][:10].str.contains(",").all():
+        for col in float_cols:
+            data[col] = (
+                data[col]
+                .str.replace(" ", "")
+                .str.replace(".", "")
+                .str.replace(",", ".")
+                .astype(float)
+            )
+    else:
+        for col in float_cols:
+            data[col] = (
+                data[col].str.replace(" ", "").str.replace(",", "").astype(float)
+            )
+
+    return data
 
 
 @st.cache_data
@@ -139,46 +179,11 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     # Drop rows where "Priority" is not "Normal"
     data = data[data["Priority"] == "Normal"]
 
-    # Check if the "Complete Time (s)" column contains a decimal separator
-    # If not, then the decimal separator is a comma
-    locale = "en_US"
-    if data["Init Time (s)"].str.contains(",").all():
-        st.info("Comma (,) detected as decimal separator.", icon="ℹ️")
-        locale = "de_DE"
-
-    # Convert time columns to float using babel library
-    data["Init Time (s)"] = (
-        data["Init Time (s)"]
-        .apply(parse_decimal, locale=locale, strict=False)
-        .astype(float)
-    )
-
-    data["Complete Time (s)"] = (
-        data["Complete Time (s)"]
-        .apply(parse_decimal, locale=locale, strict=False)
-        .astype(float)
-    )
-
-    data["Disk Service Time (µs)"] = (
-        data["Disk Service Time (µs)"]
-        .apply(parse_decimal, locale=locale, strict=False)
-        .astype(float)
-    )
-
-    data["IO Time (µs)"] = (
-        data["IO Time (µs)"]
-        .apply(parse_decimal, locale=locale, strict=False)
-        .astype(float)
-    )
+    data = locale_adjust_numbers(data)
 
     # Order the DataFrame by "Init Time (s)" column in order to calculate the difference between max offsets and min offsets
     # and categorize the operation type as "SEQ" or "RND"
     data = data.sort_values(by=["Init Time (s)"], ignore_index=True)
-
-    # Convert "Size (B)" column to int by removing the "."
-    data["Size (B)"] = (
-        data["Size (B)"].apply(parse_number, locale=locale).astype(np.int64)
-    )
 
     # Convert "Disks" to string so plotly can recognize it as categorical (not numerical, continuous)
     data["Disks"] = "Disk " + data["Disks"].astype(str)
@@ -193,7 +198,7 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
         data["Min Offset"] == data["Max Offset"].shift(1) + 1, "SEQ", "RND"
     )
 
-    return data
+    return data.dropna(how="any")
 
 
 @st.cache_data
@@ -205,8 +210,7 @@ def update_disks_names(data: pd.DataFrame, names: dict) -> pd.DataFrame:
     return data
 
 
-@st.cache_data
-def log_summary(data: pd.DataFrame, process_name: str = "") -> pd.DataFrame:
+def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     """Show totals."""
 
     log_summary = {}
@@ -248,7 +252,8 @@ def log_summary(data: pd.DataFrame, process_name: str = "") -> pd.DataFrame:
 
     # total data read in GBytes
     log_summary["Read data size"] = "{:.2f} GB".format(
-        (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).sum() / toGB
+        ((data["Count"] * data["Size (B)"]).where(data["IO Type"] == "Read")).sum()
+        / toGB
     )
 
     # total data written in GBytes
@@ -651,7 +656,7 @@ def show_request_size(data: pd.DataFrame):
 
     for disk_name in length_counts["Disks"].unique():
         df = length_counts[length_counts["Disks"] == disk_name].copy()
-        df["Request Size (KB)"] = (df["Size (B)"] / toKB).astype(np.int64)
+        df["Request Size (KB)"] = (df["Size (B)"] / toKB).astype(int)
         df.drop(["Disks", "Size (B)"], axis=1, inplace=True)
         # Calculate percentage within each request group
         df["Percent"] = (
@@ -692,6 +697,19 @@ def reset_filters():
     st.session_state.avail_sizes = "ALL"
 
 
+@st.cache_resource
+def download_custom_profile() -> Optional[bytes]:
+    url = "https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile"
+    # Open the URL and read its content
+    try:
+        with urllib.request.urlopen(url) as response:
+            custom_profile = response.read()
+    except urllib.error.URLError:
+        return None
+
+    return custom_profile
+
+
 # Define the Streamlit app
 def main():
     st.set_page_config(
@@ -725,6 +743,15 @@ def main():
             unsafe_allow_html=True,
         )
 
+    st.header(":inbox_tray: Download our profile")
+    st.write(
+        "You will need our custom WPA profile to run the `wpaexporter.exe` tool (see 'Usage' section above)."
+    )
+    custom_profile = download_custom_profile()
+    st.download_button(
+        "Download DiskIO.wpaProfile", custom_profile, "DiskIO.wpaProfile"
+    )
+
     st.header(":outbox_tray: Upload your log file")
     uploaded_file = st.file_uploader(
         "Upload your (compressed) wpaexporter generated csv file:",
@@ -739,7 +766,10 @@ def main():
         return
 
     # Read the uploaded log file
+    start_time = timer()
     data = read_uploaded_file(uploaded_file)
+    stop_time = timer()
+    st.caption(f"Read and processing took: {stop_time - start_time:.2f} seconds.")
 
     # Display a sample of the loaded data
     with st.expander("Sample of the loaded data"):
@@ -752,7 +782,7 @@ def main():
         "Filter by Process Name:", options=process_names, key="process_names"
     )
     avail_sizes = sorted(
-        np.unique((data["Size (B)"].unique() / toKB).astype(np.int64)).tolist()
+        np.unique((data["Size (B)"].unique().astype(int) / toKB).astype(int)).tolist()
     )
     avail_sizes.pop(0)
     avail_sizes.insert(0, "ALL")
@@ -842,10 +872,10 @@ if __name__ == "__main__":
     ]
 
     column_types = {
-        "Count": np.int64,
-        "Disks": np.int64,
-        "QD/C": np.int64,
-        "QD/I": np.int64,
+        "Count": int,
+        "Disks": int,
+        "QD/C": int,
+        "QD/I": int,
         "Max Offset": str,
         "Min Offset": str,
         "Size (B)": str,
@@ -867,4 +897,4 @@ if __name__ == "__main__":
     t0 = timer()
     main()
     tf = timer()
-    st.caption(f"Data processing took: {tf-t0:.2f} seconds.")
+    st.caption(f"Total computational time: {tf-t0:.2f} seconds.")
