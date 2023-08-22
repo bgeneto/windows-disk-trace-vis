@@ -176,7 +176,9 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     data = data.sort_values(by=["Init Time (s)"], ignore_index=True)
 
     # Convert "Size (B)" column to int by removing the "."
-    data["Size (B)"] = data["Size (B)"].apply(parse_number, locale=locale).astype(int)
+    data["Size (B)"] = (
+        data["Size (B)"].apply(parse_number, locale=locale).astype(np.int64)
+    )
 
     # Convert "Disks" to string so plotly can recognize it as categorical (not numerical, continuous)
     data["Disks"] = "Disk " + data["Disks"].astype(str)
@@ -210,7 +212,7 @@ def log_summary(data: pd.DataFrame, process_name: str = "") -> pd.DataFrame:
     log_summary = {}
 
     # Compute the total monitoring time by taking the max value from the "Time" column
-    log_summary["Monitoring time"] = "{:.2g} seconds".format(
+    log_summary["Monitoring time"] = "{:.2f} seconds".format(
         data["Complete Time (s)"].max()
     )
 
@@ -370,6 +372,11 @@ def plot_summary(data: pd.DataFrame):
 
     with st.expander("Show data"):
         st.dataframe(df)
+        st.write(
+            '> **Note:** The percentage displayed on this chart is distinct from the "Percent RANDOM" and "Percent SEQUENTIAL" indicated in '
+            + "the Data Summary table above. This distinction arises because the table presents the percentage of RND/SEQ requests, whereas the chart illustrates "
+            + "the percentage based on data size."
+        )
 
     # RND and SEQ requested data by request type per disk
     # --------------------------------------
@@ -533,24 +540,39 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         st.dataframe(df)
 
     # average throughput per category
-    total_time_sec = (
-        fdf.groupby(["Disks", "Category"])["Disk Service Time (µs)"].sum() * 1e-6
-    )
-    df = (fdf.groupby(["Disks", "Category"])["Size (B)"].sum() / toMB) / total_time_sec
+    disks_names = sorted(data["Disks"].unique().tolist())
+    for disk_name in disks_names:
+        total_time_sec = (
+            fdf[fdf["Disks"] == disk_name]
+            .groupby(["IO Type", "Category"])["Disk Service Time (µs)"]
+            .sum()
+            * 1e-6
+        )
 
-    # Create an interactive grouped bar plot using Plotly
-    fig = px.bar(
-        df.unstack(),
-        color="Category",
-        barmode="group",
-        title="Average Throughput per Category",
-        labels={"value": "Average Throughput (MB/s)"},
-    )
+        df = (
+            fdf[data["Disks"] == disk_name]
+            .groupby(["IO Type", "Category"])["Size (B)"]
+            .sum()
+            / toMB
+        ) / total_time_sec
 
-    st.plotly_chart(fig, use_container_width=True)
+        df.rename("Average Throughput (MB/s)", inplace=True)
 
-    with st.expander("Show data"):
-        st.dataframe(df)
+        # Create an interactive grouped bar plot using Plotly
+        fig = px.bar(
+            df.reset_index(),
+            x="Category",
+            y="Average Throughput (MB/s)",
+            color="IO Type",
+            barmode="group",
+            title=f"Average Throughput per IO Type and Category - {disk_name}",
+            labels={"value": "Average Throughput (MB/s)"},
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Show data"):
+            st.dataframe(df)
 
     # average IOPS
     total_time_sec = (
@@ -628,8 +650,8 @@ def show_request_size(data: pd.DataFrame):
     )
 
     for disk_name in length_counts["Disks"].unique():
-        df = length_counts[length_counts["Disks"] == disk_name]
-        df["Request Size (KB)"] = (df["Size (B)"] / toKB).astype(int)
+        df = length_counts[length_counts["Disks"] == disk_name].copy()
+        df["Request Size (KB)"] = (df["Size (B)"] / toKB).astype(np.int64)
         df.drop(["Disks", "Size (B)"], axis=1, inplace=True)
         # Calculate percentage within each request group
         df["Percent"] = (
@@ -730,7 +752,7 @@ def main():
         "Filter by Process Name:", options=process_names, key="process_names"
     )
     avail_sizes = sorted(
-        np.unique((data["Size (B)"].unique() / toKB).astype(int)).tolist()
+        np.unique((data["Size (B)"].unique() / toKB).astype(np.int64)).tolist()
     )
     avail_sizes.pop(0)
     avail_sizes.insert(0, "ALL")
@@ -820,10 +842,10 @@ if __name__ == "__main__":
     ]
 
     column_types = {
-        "Count": int,
-        "Disks": int,
-        "QD/C": int,
-        "QD/I": int,
+        "Count": np.int64,
+        "Disks": np.int64,
+        "QD/C": np.int64,
+        "QD/I": np.int64,
         "Max Offset": str,
         "Min Offset": str,
         "Size (B)": str,
