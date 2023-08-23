@@ -20,23 +20,23 @@ First, you need to record a trace of your 'Disk I/O activity' with WPRUI.exe. Yo
 Then you need to convert the saved `.etl` file to a `.csv` file using the `wpaexporter.exe` tool that comes with [Windows ADK](https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install).
 The `wpaexporter.exe` tool is typically located in the `C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit` folder, an example usage follows:
 ```cmd
-> wpaexporter.exe -i boottrace.etl -profile DiskIO.wpaProfile -delimiter ;
+wpaexporter.exe -i boottrace.etl -profile DiskIO.wpaProfile -delimiter ;
 ```
 
 You can also trace your boot process as follows:
 
 - Open an elevated command prompt and run:
 
-   ```
-   > wpr -addboot GeneralProfile.Light -filemode -recordtempto D:\\Temp
+   ```cmd
+   wpr -addboot GeneralProfile.Light -filemode -recordtempto D:\\Temp
    ```
 
 After this, the trace will start automatically at the early stage of the next (re)boot.
 
 - The command syntax to save the boot trace (.etl file) is the following:
 
-   ```
-   > wpr -stopboot D:\\Temp\\boottrace.etl
+   ```cmd
+   wpr -stopboot D:\\Temp\\boottrace.etl
    ```
 
 Now you can upload the (compressed) `.csv` file to this page. The page script &mdash; written in Python{python_svg}using Pandas{pandas_svg} &mdash; will analyze the single trace record using the provided
