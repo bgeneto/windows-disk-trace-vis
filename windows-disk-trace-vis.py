@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: UTF-8 -*-
 """Windows Disk Trace Visualizer.
 
 A simple but useful web application designed to streamline the process of analyzing Event Trace Log (ETL) files,
