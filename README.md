@@ -43,7 +43,28 @@ Now you can upload the (compressed) `.csv` file to this page. The page script &m
 [profile](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile) and show you the results in tabular and graphical formats.
 > **Note:** tested with WPR v10.0.25931.1000 on Windows 11 Pro version 22H2.
 
-# About WPR 
+# Example Output 
+
+Here is an excerpt from the application's output, which demonstrates a standard result from a Windows 11 boot trace conducted on a system that includes both an HDD and an SSD.
+
+| Metric             | Value  |
+| ------------------ | ------ |
+| Percent READ       | 90.34% |
+| Percent WRITE      | 9.66%  |
+| Percent RANDOM     | 89.55% |
+| Percent SEQUENTIAL | 10.45% |
+
+ 
+![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/5b4e9baa-d508-4281-88b9-2ec147a5b0ea)
+Note the predominant number of 4KB random read requests (60%), followed by 16KB requests (19%).
+
+![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/552796b4-f46d-490a-9721-22ab88a51687)
+Note how much faster is an SSD vs HDD in terms of latency/access time.
+
+![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/a3fd3754-5add-48d7-876f-e323fdded137)
+Random vs Sequential requests by IO Type.
+
+# About WPR
 
 Windows Performance Recorder ([WPR](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/windows-performance-recorder))
 is a performance recording tool that is based on Event Tracing for Windows ([ETW](https://learn.microsoft.com/en-us/windows/win32/etw/about-event-tracing)).
