@@ -8,12 +8,14 @@ History:  v1.0.0 Initial release
           v1.0.1 Updated profile link
           v1.0.2 Removed babel dependency and added locale_adjust_numbers function (faster)
                  Added custom profile download button
-Modified: 20230822
+          v1.0.3 Split request size graphics into random and sequential categories.
+                 Added option to remove disks.
+Modified: 20230831
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.2"
+__VERSION__ = "1.0.3"
 
 import base64
 import urllib.error
@@ -211,66 +213,64 @@ def update_disks_names(data: pd.DataFrame, names: dict) -> pd.DataFrame:
 def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     """Show totals."""
 
-    log_summary = {}
+    summary = {}
 
     # Compute the total monitoring time by taking the max value from the "Time" column
-    log_summary["Monitoring time"] = "{:.2f} seconds".format(
+    summary["Monitoring time"] = "{:.2f} seconds".format(
         data["Complete Time (s)"].max()
     )
 
     # average time for each operation
-    log_summary["Average access time"] = "{:.2f} µs".format(
+    summary["Average access time"] = "{:.2f} µs".format(
         data["Disk Service Time (µs)"].mean()
     )
 
     # number of read and write requests
-    log_summary["Read requests"] = data[data["IO Type"] == "Read"].shape[0]
-    log_summary["Write requests"] = data[data["IO Type"] == "Write"].shape[0]
+    summary["Read requests"] = data[data["IO Type"] == "Read"].shape[0]
+    summary["Write requests"] = data[data["IO Type"] == "Write"].shape[0]
 
     # total requests
-    log_summary["Total requests"] = (
-        log_summary["Read requests"] + log_summary["Write requests"]
-    )
+    summary["Total requests"] = summary["Read requests"] + summary["Write requests"]
 
     # percentage of read and write requests
-    log_summary["Percent READ"] = "{:.2f}%".format(
-        log_summary["Read requests"] / log_summary["Total requests"] * 100
+    summary["Percent READ"] = "{:.2f}%".format(
+        summary["Read requests"] / summary["Total requests"] * 100
     )
-    log_summary["Percent WRITE"] = "{:.2f}%".format(
-        log_summary["Write requests"] / log_summary["Total requests"] * 100
+    summary["Percent WRITE"] = "{:.2f}%".format(
+        summary["Write requests"] / summary["Total requests"] * 100
     )
 
     # total percentage SEQ and RND requests
-    log_summary["Percent RANDOM"] = "{:.2f}%".format(
-        data[data["Category"] == "RND"].shape[0] / log_summary["Total requests"] * 100
+    summary["Percent RANDOM"] = "{:.2f}%".format(
+        data[data["Category"] == "RND"].shape[0] / summary["Total requests"] * 100
     )
-    log_summary["Percent SEQUENTIAL"] = "{:.2f}%".format(
-        data[data["Category"] == "SEQ"].shape[0] / log_summary["Total requests"] * 100
+    summary["Percent SEQUENTIAL"] = "{:.2f}%".format(
+        data[data["Category"] == "SEQ"].shape[0] / summary["Total requests"] * 100
     )
 
     # total data read in GBytes
-    log_summary["Read data size"] = "{:.2f} GB".format(
+    summary["Read data size"] = "{:.2f} GB".format(
         ((data["Count"] * data["Size (B)"]).where(data["IO Type"] == "Read")).sum()
         / toGB
     )
 
     # total data written in GBytes
-    log_summary["Write data size"] = "{:.2f} GB".format(
+    summary["Write data size"] = "{:.2f} GB".format(
         (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).sum() / toGB
     )
 
     # total data size in GBytes
-    log_summary["Total data size"] = "{:.2f} GB".format(
+    summary["Total data size"] = "{:.2f} GB".format(
         (data["Count"] * data["Size (B)"]).sum() / toGB
     )
 
     # min and max readrequests in KB
-    log_summary["Min. read request size"] = "{:.1f} KB".format(
+    summary["Min. read request size"] = "{:.1f} KB".format(
         (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).min() / toKB
     )
 
     # avg read request in KB
-    log_summary["Avg. read request size"] = "{:.1f} KB".format(
+    summary["Avg. read request size"] = "{:.1f} KB".format(
         (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).mean() / toKB
     )
 
@@ -279,15 +279,15 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     formatted_number = (
         "{:.1f}".format(number) if number % 1 else "{:.0f}".format(number)
     )
-    log_summary["Max. read request size"] = formatted_number + " KB"
+    summary["Max. read request size"] = formatted_number + " KB"
 
     # min and max write requests in KB
-    log_summary["Min. write request size"] = "{:.1f} KB".format(
+    summary["Min. write request size"] = "{:.1f} KB".format(
         (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).min() / toKB
     )
 
     # avg write request in KB
-    log_summary["Avg. write request size"] = "{:.1f} KB".format(
+    summary["Avg. write request size"] = "{:.1f} KB".format(
         (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).mean() / toKB
     )
 
@@ -296,9 +296,9 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     formatted_number = (
         "{:.1f}".format(number) if number % 1 else "{:.0f}".format(number)
     )
-    log_summary["Max. write request size"] = formatted_number + " KB"
+    summary["Max. write request size"] = formatted_number + " KB"
 
-    return pd.DataFrame.from_dict(log_summary, orient="index", columns=["Value"])
+    return pd.DataFrame.from_dict(summary, orient="index", columns=["Value"])
 
 
 def plot_summary(data: pd.DataFrame):
@@ -336,10 +336,9 @@ def plot_summary(data: pd.DataFrame):
     with st.expander("Show data"):
         st.dataframe(df)
         st.write(
-            '> **Note:** The percentage displayed on this chart is distinct from the "Percent READ" and "Percent WRITE" indicated in '
-            + "the summary table above. This distinction arises because the table presents the percentage of requests, whereas the chart illustrates "
-            + "the percentage of data size. Because the size (in Bytes) of each request can vary, numerous (small length) requests may lead to a higher number of requests "
-            + "but lower amount of data being read or written."
+            '> **Note:** There is a difference between the percentages shown on this chart and those that are represented as "Percent READ" and "Percent WRITE" in the summary table above.'
+            + " The difference between the two is that the chart shows the percentage of data size, whilst the table shows the percentage of (the number of) requests. "
+            + " Numerous (short length) queries may result in a higher number of requests but a lesser amount of data being read or written since the size (in Bytes) of each request can vary."
         )
 
     # RND and SEQ requested data size in GB
@@ -408,7 +407,7 @@ def plot_summary(data: pd.DataFrame):
             df,
             x="Category",
             y="Size (GB)",
-            title=f"Requested Data Size by Category (RND/SEQ) and IO Type (R/W) - {disk_name}",
+            title=f"Requested Data Size by Category (RND/SEQ) and IO Type (R/W) ({disk_name})",
             color="IO Type",
             barmode="group",
             text="Percent",
@@ -568,7 +567,7 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
             y="Average Throughput (MB/s)",
             color="IO Type",
             barmode="group",
-            title=f"Average Throughput per IO Type and Category - {disk_name}",
+            title=f"Average Throughput per IO Type and Category ({disk_name})",
             labels={"value": "Average Throughput (MB/s)"},
         )
 
@@ -598,7 +597,12 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         st.dataframe(df)
 
 
-def show_request_size(data: pd.DataFrame):
+def custom_int_float_format(value):
+    return "{:.1f}".format(value) if value % 1 else "{:.0f}".format(value)
+
+
+def show_request_size_count(data: pd.DataFrame):
+    """Show most frequent request size per total request count."""
     # compute average read and write request size in kbytes
     df = (
         (data.groupby(["Disks", "IO Type"])["Size (B)"].mean() / toKB)
@@ -624,59 +628,135 @@ def show_request_size(data: pd.DataFrame):
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # Define specific "Size (B)" values to count
-    length_values = [
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        65536,
-        131072,
-        262144,
-        524288,
-        1048576,
-        2097152,
-        4194304,
-    ]
-
     # Count occurrences of specific "Size (B)"
-    length_counts = (
-        data[data["Size (B)"].isin(length_values)]
-        .groupby(["Disks", "IO Type"])["Size (B)"]
+    length_counts_df = (
+        data.groupby(["Disks", "IO Type"])["Size (B)"]
         .value_counts()
         .sort_index()
         .to_frame()
         .reset_index()
     )
 
-    for disk_name in length_counts["Disks"].unique():
-        df = length_counts[length_counts["Disks"] == disk_name].copy()
-        df["Request Size (KB)"] = (df["Size (B)"] / toKB).astype(int)
+    for disk_name in length_counts_df["Disks"].unique():
+        df = length_counts_df[length_counts_df["Disks"] == disk_name].copy()
+        df["Request Size"] = (
+            (df["Size (B)"] / toKB)
+            .apply(lambda x: "{:.1f}KB".format(x) if x % 1 else "{:.0f}KB".format(x))
+            .astype(str)
+        )
         df.drop(["Disks", "Size (B)"], axis=1, inplace=True)
         # Calculate percentage within each request group
         df["Percent"] = (
             df["count"] / df.groupby("IO Type")["count"].transform("sum") * 100
         )
+        # drop rows with percentage below threshold
+        threshold = 1.0
+        # Identify rows to drop
+        rows_to_drop = df.index[df["Percent"] < threshold]
+        # Drop rows
+        df.drop(index=rows_to_drop, inplace=True)
         # Create the plot
         fig = px.bar(
-            df,
-            x="Request Size (KB)",
-            y="count",
+            df.sort_values(by=["Percent"], ascending=False),
+            x="Request Size",
+            y="Percent",
             color="IO Type",
             barmode="group",
-            title=f"Number of Requests by Size - {disk_name}",
+            title=f"Percentage of Number of Requests per Request Size ({disk_name})",
             text="Percent",
-            custom_data=["IO Type", "Percent"],
+            custom_data=["IO Type", "Percent", "count"],
         )
         # Annotate the bars with percentage values
         fig.update_xaxes(type="category")
         fig.update_traces(
             texttemplate="%{text:.3s}%",
             textposition="inside",
-            hovertemplate="Size: %{x}KB<br>Count: %{y}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<extra></extra>",
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Count: %{customdata[2]}<extra></extra>",
+        )
+        fig.update_layout(
+            xaxis={"categoryorder": "total descending"},
+            yaxis_title="Percent of Requests",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Show data"):
+            st.dataframe(df)
+
+
+def show_request_size_bytes(data: pd.DataFrame):
+    """Show most frequent request size per total bytes."""
+
+    # Count occurrences of specific "Size (B)"
+    length_bytes_df = (
+        data.groupby(["Disks", "IO Type"])["Size (B)"]
+        .value_counts()
+        .sort_index()
+        .to_frame()
+        .reset_index()
+    )
+    length_bytes_df["Total Size"] = (
+        length_bytes_df["Size (B)"] * length_bytes_df["count"]
+    )
+
+    # find the best unit to display the total size by averaging the total size
+    # and then dividing by the best unit
+    avg = length_bytes_df["Total Size"].mean()
+    if avg / toGB > 1:
+        length_bytes_df["Total Size"] = length_bytes_df["Total Size"] / toGB
+        unit = "GB"
+    elif avg / toMB > 1:
+        length_bytes_df["Total Size"] = length_bytes_df["Total Size"] / toMB
+        unit = "MB"
+    elif avg / toKB > 1:
+        length_bytes_df["Total Size"] = length_bytes_df["Total Size"] / toKB
+        unit = "KB"
+    else:
+        length_bytes_df["Total Size"] = length_bytes_df["Total Size"]
+        unit = "B"
+
+    for disk_name in length_bytes_df["Disks"].unique():
+        df = length_bytes_df[length_bytes_df["Disks"] == disk_name].copy()
+        df["Request Size"] = (
+            (df["Size (B)"] / toKB)
+            .apply(lambda x: "{:.1f}KB".format(x) if x % 1 else "{:.0f}KB".format(x))
+            .astype(str)
+        )
+        # Calculate percentage within each request group
+        df["Percent"] = (
+            df["Total Size"]
+            / df.groupby("IO Type")["Total Size"].transform("sum")
+            * 100
+        )
+        # drop unused columns
+        df.drop(["Disks", "Size (B)", "count"], axis=1, inplace=True)
+        # drop rows with percentage below threshold
+        threshold = 1.0
+        # Identify rows to drop
+        rows_to_drop = df.index[df["Percent"] < threshold]
+        # Drop rows
+        df.drop(index=rows_to_drop, inplace=True)
+        # Create the plot
+        fig = px.bar(
+            df.sort_values(by=["Percent"], ascending=False),
+            x="Request Size",
+            y="Percent",
+            color="IO Type",
+            barmode="group",
+            title=f"Percentage of R/W Data Size per Request Size ({disk_name})",
+            text="Percent",
+            custom_data=["IO Type", "Percent", "Total Size"],
+        )
+        # Annotate the bars with percentage values
+        fig.update_xaxes(type="category")
+        fig.update_traces(
+            texttemplate="%{text:.3s}%",
+            textposition="inside",
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Size: %{customdata[2]:.1f}"
+            + unit
+            + "<extra></extra>",
+        )
+        fig.update_layout(
+            xaxis={"categoryorder": "total descending"},
+            yaxis_title="Percent of Requested Data",
         )
         st.plotly_chart(fig, use_container_width=True)
         with st.expander("Show data"):
@@ -686,13 +766,14 @@ def show_request_size(data: pd.DataFrame):
 def initial_sidebar_config():
     # sidebar contents
     sidebar = st.sidebar
-    sidebar.subheader("..:: MENU ::..")
+    sidebar.subheader(":gear: Options")
     return sidebar
 
 
-def reset_filters():
-    st.session_state.process_name = "ALL"
+def reset_filters(disks_names: list[str]):
+    st.session_state.process_names = "ALL"
     st.session_state.avail_sizes = "ALL"
+    st.session_state.selected_disks = disks_names
 
 
 @st.cache_resource
@@ -706,6 +787,18 @@ def download_custom_profile() -> Optional[bytes]:
         return None
 
     return custom_profile
+
+
+@st.cache_data
+def remove_disk(
+    data: pd.DataFrame, disks_names: list[str], selected_disks: list[str]
+) -> pd.DataFrame:
+    """Remove disk from data."""
+    for disk_name in disks_names:
+        if disk_name not in selected_disks:
+            data = data[data["Disks"] != disk_name]
+
+    return data
 
 
 # Define the Streamlit app
@@ -788,18 +881,34 @@ def main():
         "Filter by Size (KB):", options=avail_sizes, key="avail_sizes"
     )
 
-    sidebar.button("Clear Filters", on_click=reset_filters)
-
     # Rename disks if more than one disk is found
+    selected_disks = None
     disks_names = sorted(data["Disks"].unique().tolist())
-    if len(disks_names) > 1:
-        st.header(":pencil: Name your disks")
-        st.write(
-            "Your trace reports more than one disk in your system. You can rename your disks below."
+    if len(disks_names) >= 1:
+        # check if the user selected a disk to remove
+        placeholder = sidebar.empty()
+        selected_disks = placeholder.multiselect(
+            label="Disks to display:",
+            options=disks_names,
+            default=st.session_state.selected_disks
+            if "selected_disks" in st.session_state
+            else disks_names,
+            key="selected_disks",
         )
+        if selected_disks:
+            data = remove_disk(data, disks_names, selected_disks)
+
+    sidebar.button("Clear Filters", on_click=reset_filters, args=(disks_names,))
+
+    # check again if there is more than one disk (after removing disks)
+    disks_names = sorted(data["Disks"].unique().tolist())
+    if len(disks_names) >= 1:
+        # check if user wants to rename disks
+        st.header(":pencil: Rename your disks")
         new_names = {}
         for name in disks_names:
-            new_names[name] = st.text_input(name + " name:", name)
+            new_names[name] = st.text_input(name + " name:", name, key=name)
+        # update data with new names
         data = update_disks_names(data, new_names)
 
     # Check if the user selected a process name
@@ -830,7 +939,8 @@ def main():
             can help you determine the most important aspect of an SSD disk to consider for your desired workload.
             """
         )
-    show_request_size(data)
+    show_request_size_count(data)
+    show_request_size_bytes(data)
 
     # Show access time info
     st.header(":stopwatch: Performance")
@@ -885,6 +995,24 @@ if __name__ == "__main__":
         "Priority": str,
         "IO Type": str,
     }
+
+    # Define specific request sizes to account for
+    length_values = [
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768,
+        65536,
+        131072,
+        262144,
+        524288,
+        1048576,
+        2097152,
+        4194304,
+    ]
 
     # conversion factors from bytes
     toGB = 1024**3
