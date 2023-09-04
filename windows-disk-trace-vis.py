@@ -848,7 +848,7 @@ def show_request_size_time(data: pd.DataFrame):
 def initial_sidebar_config():
     # sidebar contents
     sidebar = st.sidebar
-    sidebar.subheader(":gear: Options")
+    sidebar.subheader(":gear: Options Menu")
     return sidebar
 
 
@@ -965,7 +965,9 @@ def main():
     avail_sizes.pop(0)
     avail_sizes.insert(0, "ALL")
     filter_size = sidebar.selectbox(
-        "Filter by Size (KB):", options=avail_sizes, key="avail_sizes"
+        "Filter by Request Size (KB):",
+        options=avail_sizes,
+        key="avail_sizes",
     )
 
     # Rename disks if more than one disk is found
