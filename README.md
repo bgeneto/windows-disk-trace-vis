@@ -13,10 +13,10 @@ All this info is valuable for understanding where the performance of your disk/s
 
 # Usage 
 
-The webapp is hosted [here](https://windows-disk-trace-vis.streamlit.app). You will need my custom
-[profile](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile) to convert the trace log to csv format. 
+The webapp is hosted [here](https://windows-disk-trace-vis.streamlit.app). You will need my custom view
+[profile](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/DiskIO.wpaProfile) to convert the .etl trace log file to a .csv file. 
 
-First, you need to record a trace of your 'Disk I/O activity' with WPRUI.exe. You can trace your Windows boot process or a specific application/workload.
+First, you need to record a trace of your 'Disk I/O activity' with WPRUI.exe (or via command line). You can trace your Windows boot process or a specific application/workload.
 Then you need to convert the saved `.etl` file to a `.csv` file using the `wpaexporter.exe` tool that comes with [Windows ADK](https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install).
 The `wpaexporter.exe` tool is typically located in the `C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit` folder, an example usage follows:
 ```cmd
@@ -45,24 +45,47 @@ Now you can upload the (compressed) `.csv` file to this page. The page script &m
 
 # Example Output 
 
-Here is an excerpt from the application's output, which demonstrates a standard result from a Windows 11 boot trace conducted on a system that includes both an HDD and an SSD.
+Here is an excerpt from the application's output, which demonstrates a typical result from our Windows 11 boot trace [example file](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/Disk_Usage_Counts_by_IO_Type_Priority.csv.bz2).
 
-| Metric             | Value  |
-| ------------------ | ------ |
-| Percent READ       | 90.34% |
-| Percent WRITE      | 9.66%  |
-| Percent RANDOM     | 89.55% |
-| Percent SEQUENTIAL | 10.45% |
+|                         | Value         |
+| ----------------------- | :------------ |
+| Monitoring time         | 52.25 seconds |
+| Average access time     | 83.93 µs      |
+| Read requests           | 150704        |
+| Write requests          | 15948         |
+| Total requests          | 166652        |
+| Percent READ            | 90.43%        |
+| Percent WRITE           | 9.57%         |
+| Percent RANDOM          | 90.07%        |
+| Percent SEQUENTIAL      | 9.93%         |
+| Read data size          | 3.65 GB       |
+| Write data size         | 0.29 GB       |
+| Total data size         | 3.95 GB       |
+| Min. read request size  | 0.5 KB        |
+| Avg. read request size  | 25.4 KB       |
+| Max. read request size  | 43132.5 KB    |
+| Min. write request size | 0.5 KB        |
+| Avg. write request size | 19.3 KB       |
+| Max. write request size | 1136 KB       |
+
+
 
  
-![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/5b4e9baa-d508-4281-88b9-2ec147a5b0ea)
-Note the predominant number of 4KB random read requests (60%), followed by 16KB requests (19%).
+![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/38aca37a-4fc5-42ce-8ab6-8e97dda44992)
+
+☝ Note the predominant number of 4KB random read requests (56%), followed by 16KB requests (18% read|30% write).
+
+![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/fcc5ef51-1b98-48a2-9722-3360d36343c0)
+
+☝ Time spent in every request size. 
 
 ![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/552796b4-f46d-490a-9721-22ab88a51687)
-Note how much faster is an SSD vs HDD in terms of latency/access time.
+
+☝ Note how much faster is an SSD vs HDD in terms of latency/access time.
 
 ![image](https://github.com/bgeneto/windows-disk-trace-vis/assets/473074/a3fd3754-5add-48d7-876f-e323fdded137)
-Random vs Sequential requests by IO Type.
+
+☝ Random vs Sequential requests by IO Type.
 
 # About WPR
 
