@@ -890,7 +890,7 @@ def main():
 
     st.set_page_config(
         page_title=app_title,
-        # layout="wide",
+        layout="wide",
         page_icon=":chart_with_upwards_trend:",
         initial_sidebar_state="auto",
     )
