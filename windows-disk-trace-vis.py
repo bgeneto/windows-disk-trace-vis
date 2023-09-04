@@ -10,12 +10,13 @@ History:  v1.0.0 Initial release
                  Added custom profile download button
           v1.0.3 Split request size graphics into random and sequential categories.
                  Added option to remove disks.
-Modified: 20230831
+          v1.0.4 Added Request Size by Duration chart.
+Modified: 20230903
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.3"
+__VERSION__ = "1.0.4"
 
 import base64
 import urllib.error
@@ -303,7 +304,7 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
 
 def plot_summary(data: pd.DataFrame):
     # Total requests in GB
-    # --------------------------------------
+
     df = (
         (data.groupby(["Disks", "IO Type"])["Size (B)"].sum() / toGB)
         .to_frame()
@@ -637,7 +638,7 @@ def show_request_size_count(data: pd.DataFrame):
         .reset_index()
     )
 
-    for disk_name in length_counts_df["Disks"].unique():
+    for disk_name in sorted(length_counts_df["Disks"].unique().tolist()):
         df = length_counts_df[length_counts_df["Disks"] == disk_name].copy()
         df["Request Size"] = (
             (df["Size (B)"] / toKB)
@@ -649,10 +650,8 @@ def show_request_size_count(data: pd.DataFrame):
         df["Percent"] = (
             df["count"] / df.groupby("IO Type")["count"].transform("sum") * 100
         )
-        # drop rows with percentage below threshold
-        threshold = 1.0
         # Identify rows to drop
-        rows_to_drop = df.index[df["Percent"] < threshold]
+        rows_to_drop = df.index[df["Percent"] < percentage_threshold]
         # Drop rows
         df.drop(index=rows_to_drop, inplace=True)
         # Create the plot
@@ -713,7 +712,7 @@ def show_request_size_bytes(data: pd.DataFrame):
         length_bytes_df["Total Size"] = length_bytes_df["Total Size"]
         unit = "B"
 
-    for disk_name in length_bytes_df["Disks"].unique():
+    for disk_name in sorted(length_bytes_df["Disks"].unique().tolist()):
         df = length_bytes_df[length_bytes_df["Disks"] == disk_name].copy()
         df["Request Size"] = (
             (df["Size (B)"] / toKB)
@@ -728,10 +727,8 @@ def show_request_size_bytes(data: pd.DataFrame):
         )
         # drop unused columns
         df.drop(["Disks", "Size (B)", "count"], axis=1, inplace=True)
-        # drop rows with percentage below threshold
-        threshold = 1.0
         # Identify rows to drop
-        rows_to_drop = df.index[df["Percent"] < threshold]
+        rows_to_drop = df.index[df["Percent"] < percentage_threshold]
         # Drop rows
         df.drop(index=rows_to_drop, inplace=True)
         # Create the plot
@@ -761,6 +758,91 @@ def show_request_size_bytes(data: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
         with st.expander("Show data"):
             st.dataframe(df)
+            st.write(
+                f"> **Note:** Percentages below the threshold ({percentage_threshold}%) are not displayed. "
+                + "The slider in the :point_left: left sidebar allows you to modify this threshold value. "
+                + "Decrease the threshold to show more data, or increase it to show less data."
+            )
+
+
+def show_request_size_time(data: pd.DataFrame):
+    """Show request sizes vs disk service time."""
+
+    # One chart for each disk
+    for disk_name in sorted(data["Disks"].unique().tolist()):
+        df = data[data["Disks"] == disk_name].copy()
+        df = (
+            (
+                df.groupby(["IO Type", "Category", "Size (B)"])[
+                    "Disk Service Time (µs)"
+                ].sum()
+            )
+            .to_frame()
+            .reset_index()
+        )
+
+        # rename column
+        df.rename(columns={"Disk Service Time (µs)": "Disk Service Time"}, inplace=True)
+
+        # request size with proper unit
+        df["Request Size"] = (
+            (df["Size (B)"] / toKB)
+            .apply(lambda x: "{:.1f}KB".format(x) if x % 1 else "{:.0f}KB".format(x))
+            .astype(str)
+        )
+
+        # Calculate percentage within each disk group
+        df["Percent"] = (
+            df["Disk Service Time"]
+            / df.groupby("IO Type")["Disk Service Time"].transform("sum")
+            * 100
+        )
+
+        # find proper unit for disk service time
+        avg = df["Disk Service Time"].mean()
+        if avg / toSec > 1:
+            df["Disk Service Time"] = df["Disk Service Time"] / toSec
+            unit = "s"
+        elif avg / toMSec > 1:
+            df["Disk Service Time"] = df["Disk Service Time"] / toMSec
+            unit = "ms"
+        else:
+            unit = "µs"
+
+        df.drop(["Size (B)"], axis=1, inplace=True)
+
+        # Drop rows
+        rows_to_drop = df.index[df["Percent"] < percentage_threshold]
+        df.drop(index=rows_to_drop, inplace=True)
+
+        # Create a plotly bar chart
+        fig = px.bar(
+            df.sort_values(by=["Percent"], ascending=False),
+            x="Request Size",
+            y="Percent",
+            title=f"Disk Service Time per Request Size ({disk_name})",
+            color="IO Type",
+            barmode="group",
+            text="Percent",
+            custom_data=["IO Type", "Percent", "Disk Service Time", "Category"],
+        )
+
+        # Annotate the bars with percentage values
+        fig.update_xaxes(type="category")
+        fig.update_traces(
+            texttemplate="%{text:.3s}%",
+            textposition="inside",
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Time: %{customdata[2]:.1f}"
+            + unit
+            + "<br>Category: %{customdata[3]}<extra></extra>",
+        )
+        fig.update_layout(
+            xaxis={"categoryorder": "total descending"},
+            yaxis_title="Percent of Disk Service Time",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Show data"):
+            st.dataframe(df)
 
 
 def initial_sidebar_config():
@@ -774,6 +856,7 @@ def reset_filters(disks_names: list[str]):
     st.session_state.process_names = "ALL"
     st.session_state.avail_sizes = "ALL"
     st.session_state.selected_disks = disks_names
+    st.session_state.percentage_threshold = 1.0
 
 
 @st.cache_resource
@@ -803,6 +886,8 @@ def remove_disk(
 
 # Define the Streamlit app
 def main():
+    global percentage_threshold
+
     st.set_page_config(
         page_title=app_title,
         # layout="wide",
@@ -842,7 +927,9 @@ def main():
     st.download_button(
         "Download DiskIO.wpaProfile", custom_profile, "DiskIO.wpaProfile"
     )
-
+    st.write(
+        "A sample (Windows 11 boot) trace file can be downloaded [here](https://raw.githubusercontent.com/bgeneto/windows-disk-trace-vis/main/Disk_Usage_Counts_by_IO_Type_Priority.csv.bz2) for testing purposes."
+    )
     st.header(":outbox_tray: Upload your log file")
     uploaded_file = st.file_uploader(
         "Upload your (compressed) wpaexporter generated csv file:",
@@ -898,6 +985,17 @@ def main():
         if selected_disks:
             data = remove_disk(data, disks_names, selected_disks)
 
+    # customize percentage threshold
+    percentage_threshold = sidebar.slider(
+        "Percentage threshold:",
+        0.0,
+        5.0,
+        value=1.0,
+        step=0.25,
+        key="percentage_threshold",
+    )
+
+    # reset options/filters button
     sidebar.button("Clear Filters", on_click=reset_filters, args=(disks_names,))
 
     # check again if there is more than one disk (after removing disks)
@@ -926,7 +1024,7 @@ def main():
     # Plot summary
     plot_summary(data)
 
-    st.header(":bar_chart: Request Size")
+    st.header(":bar_chart: Request Size Charts")
     with st.expander("Show info"):
         st.write(
             """
@@ -941,9 +1039,10 @@ def main():
         )
     show_request_size_count(data)
     show_request_size_bytes(data)
+    show_request_size_time(data)
 
     # Show access time info
-    st.header(":stopwatch: Performance")
+    st.header(":stopwatch: Performance Charts")
     with st.expander("Show info"):
         st.write(
             """
@@ -1014,10 +1113,17 @@ if __name__ == "__main__":
         4194304,
     ]
 
+    # drop rows with percentage below threshold
+    percentage_threshold = 1.0
+
     # conversion factors from bytes
     toGB = 1024**3
     toMB = 1024**2
     toKB = 1024
+
+    # conversion factors from microseconds
+    toMSec = 1e3
+    toSec = 1e6
 
     # Run the app
     t0 = timer()
