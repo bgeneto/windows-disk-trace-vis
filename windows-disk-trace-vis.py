@@ -13,12 +13,13 @@ History:  v1.0.0 Initial release
           v1.0.4 Added Request Size by Duration chart.
           v1.0.5 Added IOPS chart and color consistency.
           v1.0.6 Better unit handling.
-Modified: 20230904
+          v1.0.7 Improved label and number formatting. Added disk service time per process.
+Modified: 20230905
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.6"
+__VERSION__ = "1.0.7"
 
 import base64
 import urllib.error
@@ -777,7 +778,7 @@ def show_request_size_bytes(data: pd.DataFrame):
         fig.update_traces(
             texttemplate="%{text:.3s}%",
             textposition="inside",
-            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Size: %{customdata[2]:.1f}"
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Data: %{customdata[2]:.2f}"
             + unit
             + "<extra></extra>",
         )
@@ -814,11 +815,11 @@ def show_request_size_iops(data: pd.DataFrame):
             .astype(str)
         )
 
-        # show only the top 10 requests
+        # show only the top requests
         df = (
             df.sort_values(by=["request_count"], ascending=False)
             .groupby("IO Type")
-            .head(10)
+            .head(top_charts_count)
             .reset_index(drop=True)
         )
 
@@ -827,7 +828,7 @@ def show_request_size_iops(data: pd.DataFrame):
             df.sort_values(by=["iops"], ascending=False),
             x="Request Size",
             y="iops",
-            title=f"IOPS per Request Size ({disk_name})",
+            title=f"Top {top_charts_count} IOPS per Request Size ({disk_name})",
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="group",
@@ -911,7 +912,7 @@ def show_request_size_time(data: pd.DataFrame):
         fig.update_traces(
             texttemplate="%{text:.3s}%",
             textposition="inside",
-            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Time: %{customdata[2]:.1f}"
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Time: %{customdata[2]:.2f}"
             + unit
             + "<br>Category: %{customdata[3]}<extra></extra>",
         )
@@ -938,7 +939,7 @@ def show_request_size_process(data: pd.DataFrame):
             )
             .to_frame()
             .reset_index()
-            .head(10)
+            .head(top_charts_count)
         )
         # find the best unit to display the total size by averaging the total size
         # and then dividing by the best unit
@@ -959,7 +960,7 @@ def show_request_size_process(data: pd.DataFrame):
             df,
             x="Process Name",
             y="Total Size",
-            title=f"Requested Data Size per Process ({disk_name})",
+            title=f"Top {top_charts_count} Requested Data Size per Process ({disk_name})",
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="group",
@@ -967,7 +968,53 @@ def show_request_size_process(data: pd.DataFrame):
         fig.update_xaxes(type="category")
         fig.update_layout(
             xaxis={"categoryorder": "total descending"},
-            yaxis_title=f"Total Requested Size ({unit})",
+            yaxis_title=f"Requested Data Size ({unit})",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Show data"):
+            st.dataframe(df)
+
+
+def show_service_time_process(data: pd.DataFrame):
+    """Compute total disk service time per process."""
+    for disk_name in sorted(data["Disks"].unique().tolist()):
+        df = data[data["Disks"] == disk_name].copy()
+        df = (
+            (df.groupby(["Process Name", "IO Type"])["Disk Service Time (µs)"].sum())
+            .to_frame()
+            .reset_index()
+        )
+
+        # show only the top 10 processes
+        df = df.sort_values(by=["Disk Service Time (µs)"], ascending=False).head(
+            top_charts_count
+        )
+
+        # find the best unit to display the total size by averaging
+        avg = df["Disk Service Time (µs)"].mean()
+        if avg / toSec > 1:
+            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toSec
+            unit = "s"
+        elif avg / toMSec > 1:
+            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toMSec
+            unit = "ms"
+        else:
+            df["Disk Service Time"] = df["Disk Service Time (µs)"]
+            unit = "µs"
+
+        fig = px.bar(
+            df,
+            x="Process Name",
+            y="Disk Service Time",
+            title=f"Top {top_charts_count} Disk Service Time per Process ({disk_name})",
+            color="IO Type",
+            color_discrete_map=io_type_color_mapping,
+            barmode="group",
+        )
+        fig.update_xaxes(type="category")
+        fig.update_layout(
+            xaxis={"categoryorder": "total descending"},
+            yaxis_title=f"Disk Service Time ({unit})",
         )
         st.plotly_chart(fig, use_container_width=True)
         with st.expander("Show data"):
@@ -986,6 +1033,7 @@ def reset_filters(disks_names: list[str]):
     st.session_state.avail_sizes = "ALL"
     st.session_state.selected_disks = disks_names
     st.session_state.percentage_threshold = 1.0
+    st.session_state.top_charts_count = 10
 
 
 @st.cache_resource
@@ -1016,6 +1064,7 @@ def remove_disk(
 # Define the Streamlit app
 def main():
     global percentage_threshold
+    global top_charts_count
 
     st.set_page_config(
         page_title=app_title,
@@ -1126,6 +1175,15 @@ def main():
         key="percentage_threshold",
     )
 
+    top_charts_count = sidebar.slider(
+        "Number of top charts:",
+        1,
+        20,
+        value=10,
+        step=1,
+        key="top_charts_count",
+    )
+
     # reset options/filters button
     sidebar.button("Clear Filters", on_click=reset_filters, args=(disks_names,))
 
@@ -1186,6 +1244,7 @@ def main():
     show_performance(data, filter_size)
     show_request_size_iops(data)
     show_request_size_process(data)
+    show_service_time_process(data)
 
 
 if __name__ == "__main__":
@@ -1255,8 +1314,10 @@ if __name__ == "__main__":
         "SEQ": "#00CC96",
         "RND": "#AB63FA",
     }
-    # drop rows with percentage below threshold
+
+    # defaults
     percentage_threshold = 1.0
+    top_charts_count = 10
 
     # conversion factors from bytes
     toGB = 1024**3
