@@ -817,7 +817,9 @@ def show_request_size_iops(data: pd.DataFrame):
 
         # show only the top requests
         df = (
-            df.sort_values(by=["request_count"], ascending=False)
+            df.sort_values(
+                by=["request_count"], ascending=False
+            )  # do not sort by iops here
             .groupby("IO Type")
             .head(top_charts_count)
             .reset_index(drop=True)
@@ -931,16 +933,15 @@ def show_request_size_process(data: pd.DataFrame):
         df = data[data["Disks"] == disk_name].copy()
         df["Total Size"] = data["Count"] * data["Size (B)"]
 
+        df = (df.groupby(["Process Name", "IO Type"])["Total Size"].sum()).to_frame()
+
+        # show only the top 10 processes
         df = (
-            (
-                df.sort_values(by=["Total Size"], ascending=False)
-                .groupby(["Process Name", "IO Type"])["Total Size"]
-                .sum()
-            )
-            .to_frame()
-            .reset_index()
+            df.sort_values(by=["Total Size"], ascending=False)
             .head(top_charts_count)
+            .reset_index()
         )
+
         # find the best unit to display the total size by averaging the total size
         # and then dividing by the best unit
         avg = df["Total Size"].mean()
@@ -980,14 +981,14 @@ def show_service_time_process(data: pd.DataFrame):
     for disk_name in sorted(data["Disks"].unique().tolist()):
         df = data[data["Disks"] == disk_name].copy()
         df = (
-            (df.groupby(["Process Name", "IO Type"])["Disk Service Time (µs)"].sum())
-            .to_frame()
-            .reset_index()
-        )
+            df.groupby(["Process Name", "IO Type"])["Disk Service Time (µs)"].sum()
+        ).to_frame()
 
         # show only the top 10 processes
-        df = df.sort_values(by=["Disk Service Time (µs)"], ascending=False).head(
-            top_charts_count
+        df = (
+            df.sort_values(by=["Disk Service Time (µs)"], ascending=False)
+            .head(top_charts_count)
+            .reset_index()
         )
 
         # find the best unit to display the total size by averaging
@@ -1001,6 +1002,9 @@ def show_service_time_process(data: pd.DataFrame):
         else:
             df["Disk Service Time"] = df["Disk Service Time (µs)"]
             unit = "µs"
+
+        # drop unused columns
+        df.drop(["Disk Service Time (µs)"], axis=1, inplace=True)
 
         fig = px.bar(
             df,
