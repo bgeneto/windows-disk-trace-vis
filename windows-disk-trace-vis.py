@@ -11,15 +11,13 @@ History:  v1.0.0 Initial release
           v1.0.3 Split request size graphics into random and sequential categories.
                  Added option to remove disks.
           v1.0.4 Added Request Size by Duration chart.
-          v1.0.5 Added IOPS chart and color consistency.
-          v1.0.6 Better unit handling.
-          v1.0.7 Improved label and number formatting. Added disk service time per process.
-Modified: 20230905
+          v1.0.5 Added Global (all disks) Average Throughput and Average IOPS.
+Modified: 20240128
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.7"
+__VERSION__ = "1.0.5"
 
 import base64
 import urllib.error
@@ -229,6 +227,15 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
         data["Disk Service Time (µs)"].mean()
     )
 
+    summary["Average IOPS"] = "{:.2f}".format(
+        data["Size (B)"].count() / (data["Disk Service Time (µs)"].sum() * 1e-6)
+    )
+
+    # average throughput
+    summary["Average throughput"] = "{:.2f} MB/s".format(
+        (data["Size (B)"].sum() / toMB) / (data["Disk Service Time (µs)"].sum() * 1e-6)
+    )
+
     # number of read and write requests
     summary["Read requests"] = data[data["IO Type"] == "Read"].shape[0]
     summary["Write requests"] = data[data["IO Type"] == "Write"].shape[0]
@@ -305,51 +312,35 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_dict(summary, orient="index", columns=["Value"])
 
 
-def find_proper_unit(data: pd.DataFrame, col: str) -> tuple:
-    """Find the proper unit for the given dataframe column."""
-    unit = "B"
-    factor = 1
-    avg = data[col].mean()
-    if avg / toGB > 1:
-        factor = toGB
-        unit = "GB"
-    elif avg / toMB > 1:
-        factor = toMB
-        unit = "MB"
-    elif avg / toKB > 1:
-        factor = toKB
-        unit = "KB"
-    return (factor, unit)
-
-
 def plot_summary(data: pd.DataFrame):
     # Total requests in GB
 
-    df = (data.groupby(["Disks", "IO Type"])["Size (B)"].sum()).to_frame().reset_index()
-
-    # Find the proper unit for the size
-    factor, unit = find_proper_unit(df, "Size (B)")
-    df["Size (B)"] = df["Size (B)"] / factor
-    df.rename(columns={"Size (B)": "Size"}, inplace=True)
+    df = (
+        (data.groupby(["Disks", "IO Type"])["Size (B)"].sum() / toGB)
+        .to_frame()
+        .reset_index()
+    )
 
     # Calculate percentage within each disk group
-    df["Percent"] = df["Size"] / df.groupby("Disks")["Size"].transform("sum") * 100
+    df["Percent"] = (
+        df["Size (B)"] / df.groupby("Disks")["Size (B)"].transform("sum") * 100
+    )
+
+    df.rename(columns={"Size (B)": "Size (GB)"}, inplace=True)
 
     # Create a plotly bar chart
     fig = px.bar(
         df,
         x="Disks",
-        y=f"Size",
+        y="Size (GB)",
         title="Requested Data Size",
         color="IO Type",
-        color_discrete_map=io_type_color_mapping,
         barmode="group",
         text="Percent",
     )
 
     # Annotate the bars with percentage values
     fig.update_traces(texttemplate="%{text:.3s}%", textposition="inside")
-    fig.update_layout(yaxis_title=f"Size ({unit})")
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -364,32 +355,31 @@ def plot_summary(data: pd.DataFrame):
     # RND and SEQ requested data size in GB
     # --------------------------------------
     df = (
-        (data.groupby(["Disks", "Category"])["Size (B)"].sum()).to_frame().reset_index()
+        (data.groupby(["Disks", "Category"])["Size (B)"].sum() / toGB)
+        .to_frame()
+        .reset_index()
     )
 
-    # Find the proper unit for the size
-    factor, unit = find_proper_unit(df, "Size (B)")
-    df["Size (B)"] = df["Size (B)"] / factor
-    df.rename(columns={"Size (B)": "Size"}, inplace=True)
-
     # Calculate percentage within each disk group
-    df["Percent"] = df["Size"] / df.groupby("Disks")["Size"].transform("sum") * 100
+    df["Percent"] = (
+        df["Size (B)"] / df.groupby("Disks")["Size (B)"].transform("sum") * 100
+    )
+
+    df.rename(columns={"Size (B)": "Size (GB)"}, inplace=True)
 
     # Create a plotly bar chart
     fig = px.bar(
         df,
         x="Disks",
-        y="Size",
+        y="Size (GB)",
         title="Requested Data Size by Category (Random/Sequential)",
         color="Category",
-        color_discrete_map=category_color_mapping,
         barmode="group",
         text="Percent",
     )
 
     # Annotate the bars with percentage values
     fig.update_traces(texttemplate="%{text:.3s}%", textposition="inside")
-    fig.update_layout(yaxis_title=f"Size ({unit})")
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -410,36 +400,32 @@ def plot_summary(data: pd.DataFrame):
                 data[data["Disks"] == disk_name]
                 .groupby(["IO Type", "Category"])["Size (B)"]
                 .sum()
+                / toGB
             )
             .to_frame()
             .reset_index()
         )
 
-        # Find the proper unit for the size
-        factor, unit = find_proper_unit(df, "Size (B)")
-        df["Size (B)"] = df["Size (B)"] / factor
-        df.rename(columns={"Size (B)": "Size"}, inplace=True)
-
         # Calculate percentage within each disk group
         df["Percent"] = (
-            df["Size"] / df.groupby("Category")["Size"].transform("sum") * 100
+            df["Size (B)"] / df.groupby("Category")["Size (B)"].transform("sum") * 100
         )
+
+        df.rename(columns={"Size (B)": "Size (GB)"}, inplace=True)
 
         # Create a plotly bar chart
         fig = px.bar(
             df,
             x="Category",
-            y="Size",
+            y="Size (GB)",
             title=f"Requested Data Size by Category (RND/SEQ) and IO Type (R/W) ({disk_name})",
             color="IO Type",
-            color_discrete_map=io_type_color_mapping,
             barmode="group",
             text="Percent",
         )
 
         # Annotate the bars with percentage values
         fig.update_traces(texttemplate="%{text:.3s}%", textposition="inside")
-        fig.update_layout(yaxis_title=f"Size ({unit})")
 
         st.plotly_chart(fig, use_container_width=True)
 
@@ -517,7 +503,6 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     fig = px.bar(
         df.unstack(),
         color="IO Type",
-        color_discrete_map=io_type_color_mapping,
         barmode="group",
         title="Average Access Time per IO Type",
         labels={"value": "Average Access Time (µs)"},
@@ -557,7 +542,6 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     fig = px.bar(
         df.unstack(),
         color="IO Type",
-        color_discrete_map=io_type_color_mapping,
         barmode="group",
         title="Average Throughput per IO Type",
         labels={"value": "Average Throughput (MB/s)"},
@@ -593,7 +577,6 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
             x="Category",
             y="Average Throughput (MB/s)",
             color="IO Type",
-            color_discrete_map=io_type_color_mapping,
             barmode="group",
             title=f"Average Throughput per IO Type and Category ({disk_name})",
             labels={"value": "Average Throughput (MB/s)"},
@@ -614,7 +597,6 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     fig = px.bar(
         df.unstack(),
         color="IO Type",
-        color_discrete_map=io_type_color_mapping,
         barmode="group",
         title=f"Average IOPS (size: {filter_size} KB)",
         labels={"value": "Average IOPS"},
@@ -648,7 +630,6 @@ def show_request_size_count(data: pd.DataFrame):
         x="Disks",
         y="Avg. Size (KB)",
         color="IO Type",
-        color_discrete_map=io_type_color_mapping,
         barmode="group",
         title="Average Request Size",
     )
@@ -689,7 +670,6 @@ def show_request_size_count(data: pd.DataFrame):
             x="Request Size",
             y="Percent",
             color="IO Type",
-            color_discrete_map=io_type_color_mapping,
             barmode="group",
             title=f"Percentage of Number of Requests per Request Size ({disk_name})",
             text="Percent",
@@ -767,7 +747,6 @@ def show_request_size_bytes(data: pd.DataFrame):
             x="Request Size",
             y="Percent",
             color="IO Type",
-            color_discrete_map=io_type_color_mapping,
             barmode="group",
             title=f"Percentage of R/W Data Size per Request Size ({disk_name})",
             text="Percent",
@@ -778,7 +757,7 @@ def show_request_size_bytes(data: pd.DataFrame):
         fig.update_traces(
             texttemplate="%{text:.3s}%",
             textposition="inside",
-            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Data: %{customdata[2]:.2f}"
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Size: %{customdata[2]:.1f}"
             + unit
             + "<extra></extra>",
         )
@@ -796,58 +775,8 @@ def show_request_size_bytes(data: pd.DataFrame):
             )
 
 
-def show_request_size_iops(data: pd.DataFrame):
-    """Compute IOPS per request size."""
-    for disk_name in sorted(data["Disks"].unique().tolist()):
-        df = data[data["Disks"] == disk_name].copy()
-        df = (
-            df.groupby(["IO Type", "Size (B)"])["Disk Service Time (µs)"]
-            .agg(total_time="sum", request_count="count")
-            .reset_index()
-        )
-        # compute iops
-        df["iops"] = df["request_count"] / (df["total_time"] / 1e6)
-
-        # request size with proper unit
-        df["Request Size"] = (
-            (df["Size (B)"] / toKB)
-            .apply(lambda x: "{:.1f}KB".format(x) if x % 1 else "{:.0f}KB".format(x))
-            .astype(str)
-        )
-
-        # show only the top requests
-        df = (
-            df.sort_values(
-                by=["request_count"], ascending=False
-            )  # do not sort by iops here
-            .groupby("IO Type")
-            .head(top_charts_count)
-            .reset_index(drop=True)
-        )
-
-        # Create a plotly bar chart
-        fig = px.bar(
-            df.sort_values(by=["iops"], ascending=False),
-            x="Request Size",
-            y="iops",
-            title=f"Top {top_charts_count} IOPS per Request Size ({disk_name})",
-            color="IO Type",
-            color_discrete_map=io_type_color_mapping,
-            barmode="group",
-        )
-        fig.update_xaxes(type="category")
-        fig.update_yaxes(tickformat=".2s")
-        fig.update_layout(
-            xaxis={"categoryorder": "total descending"},
-            yaxis_title="IOPS",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        with st.expander("Show data"):
-            st.dataframe(df)
-
-
 def show_request_size_time(data: pd.DataFrame):
-    """Compute total disk service time per request size."""
+    """Show request sizes vs disk service time."""
 
     # One chart for each disk
     for disk_name in sorted(data["Disks"].unique().tolist()):
@@ -903,7 +832,6 @@ def show_request_size_time(data: pd.DataFrame):
             y="Percent",
             title=f"Disk Service Time per Request Size ({disk_name})",
             color="IO Type",
-            color_discrete_map=io_type_color_mapping,
             barmode="group",
             text="Percent",
             custom_data=["IO Type", "Percent", "Disk Service Time", "Category"],
@@ -914,111 +842,13 @@ def show_request_size_time(data: pd.DataFrame):
         fig.update_traces(
             texttemplate="%{text:.3s}%",
             textposition="inside",
-            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Time: %{customdata[2]:.2f}"
+            hovertemplate="Size: %{x}<br>Type: %{customdata[0]}<br>Percent: %{customdata[1]:.1f}%<br>Time: %{customdata[2]:.1f}"
             + unit
             + "<br>Category: %{customdata[3]}<extra></extra>",
         )
         fig.update_layout(
             xaxis={"categoryorder": "total descending"},
             yaxis_title="Percent of Disk Service Time",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        with st.expander("Show data"):
-            st.dataframe(df)
-
-
-def show_request_size_process(data: pd.DataFrame):
-    """Compute request data size per process."""
-    for disk_name in sorted(data["Disks"].unique().tolist()):
-        df = data[data["Disks"] == disk_name].copy()
-        df["Total Size"] = data["Count"] * data["Size (B)"]
-
-        df = (df.groupby(["Process Name", "IO Type"])["Total Size"].sum()).to_frame()
-
-        # show only the top 10 processes
-        df = (
-            df.sort_values(by=["Total Size"], ascending=False)
-            .head(top_charts_count)
-            .reset_index()
-        )
-
-        # find the best unit to display the total size by averaging the total size
-        # and then dividing by the best unit
-        avg = df["Total Size"].mean()
-        if avg / toGB > 1:
-            df["Total Size"] = df["Total Size"] / toGB
-            unit = "GB"
-        elif avg / toMB > 1:
-            df["Total Size"] = df["Total Size"] / toMB
-            unit = "MB"
-        elif avg / toKB > 1:
-            df["Total Size"] = df["Total Size"] / toKB
-            unit = "KB"
-        else:
-            unit = "B"
-
-        fig = px.bar(
-            df,
-            x="Process Name",
-            y="Total Size",
-            title=f"Top {top_charts_count} Requested Data Size per Process ({disk_name})",
-            color="IO Type",
-            color_discrete_map=io_type_color_mapping,
-            barmode="group",
-        )
-        fig.update_xaxes(type="category")
-        fig.update_layout(
-            xaxis={"categoryorder": "total descending"},
-            yaxis_title=f"Requested Data Size ({unit})",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        with st.expander("Show data"):
-            st.dataframe(df)
-
-
-def show_service_time_process(data: pd.DataFrame):
-    """Compute total disk service time per process."""
-    for disk_name in sorted(data["Disks"].unique().tolist()):
-        df = data[data["Disks"] == disk_name].copy()
-        df = (
-            df.groupby(["Process Name", "IO Type"])["Disk Service Time (µs)"].sum()
-        ).to_frame()
-
-        # show only the top 10 processes
-        df = (
-            df.sort_values(by=["Disk Service Time (µs)"], ascending=False)
-            .head(top_charts_count)
-            .reset_index()
-        )
-
-        # find the best unit to display the total size by averaging
-        avg = df["Disk Service Time (µs)"].mean()
-        if avg / toSec > 1:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toSec
-            unit = "s"
-        elif avg / toMSec > 1:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toMSec
-            unit = "ms"
-        else:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"]
-            unit = "µs"
-
-        # drop unused columns
-        df.drop(["Disk Service Time (µs)"], axis=1, inplace=True)
-
-        fig = px.bar(
-            df,
-            x="Process Name",
-            y="Disk Service Time",
-            title=f"Top {top_charts_count} Disk Service Time per Process ({disk_name})",
-            color="IO Type",
-            color_discrete_map=io_type_color_mapping,
-            barmode="group",
-        )
-        fig.update_xaxes(type="category")
-        fig.update_layout(
-            xaxis={"categoryorder": "total descending"},
-            yaxis_title=f"Disk Service Time ({unit})",
         )
         st.plotly_chart(fig, use_container_width=True)
         with st.expander("Show data"):
@@ -1037,7 +867,6 @@ def reset_filters(disks_names: list[str]):
     st.session_state.avail_sizes = "ALL"
     st.session_state.selected_disks = disks_names
     st.session_state.percentage_threshold = 1.0
-    st.session_state.top_charts_count = 10
 
 
 @st.cache_resource
@@ -1068,11 +897,10 @@ def remove_disk(
 # Define the Streamlit app
 def main():
     global percentage_threshold
-    global top_charts_count
 
     st.set_page_config(
         page_title=app_title,
-        layout="wide",
+        # layout="wide",
         page_icon=":chart_with_upwards_trend:",
         initial_sidebar_state="auto",
     )
@@ -1179,15 +1007,6 @@ def main():
         key="percentage_threshold",
     )
 
-    top_charts_count = sidebar.slider(
-        "Number of top charts:",
-        1,
-        20,
-        value=10,
-        step=1,
-        key="top_charts_count",
-    )
-
     # reset options/filters button
     sidebar.button("Clear Filters", on_click=reset_filters, args=(disks_names,))
 
@@ -1231,8 +1050,8 @@ def main():
             """
         )
     show_request_size_count(data)
-    show_request_size_time(data)
     show_request_size_bytes(data)
+    show_request_size_time(data)
 
     # Show access time info
     st.header(":stopwatch: Performance Charts")
@@ -1246,9 +1065,6 @@ def main():
             """
         )
     show_performance(data, filter_size)
-    show_request_size_iops(data)
-    show_request_size_process(data)
-    show_service_time_process(data)
 
 
 if __name__ == "__main__":
@@ -1309,19 +1125,8 @@ if __name__ == "__main__":
         4194304,
     ]
 
-    # color mappings
-    io_type_color_mapping = {
-        "Read": "#636EFA",
-        "Write": "#EF553B",
-    }
-    category_color_mapping = {
-        "SEQ": "#00CC96",
-        "RND": "#AB63FA",
-    }
-
-    # defaults
+    # drop rows with percentage below threshold
     percentage_threshold = 1.0
-    top_charts_count = 10
 
     # conversion factors from bytes
     toGB = 1024**3
