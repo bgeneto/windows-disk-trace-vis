@@ -16,13 +16,14 @@ History:  v1.0.0 Initial release
           v1.0.7 Improved label and number formatting. Added disk service time per process.
           v1.0.8 Added (all disks) Average Throughput and Average IOPS.
           v1.0.9 Better graph title.
-          v1.0.10 Better graphics titles 
-Modified: 20240419
+          v1.0.10 Better graphics titles
+          v1.0.11 Renamed graphics title
+Modified: 20240502
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.10"
+__VERSION__ = "1.0.11"
 
 import base64
 import urllib.error
@@ -781,7 +782,7 @@ def show_request_size_bytes(data: pd.DataFrame):
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="group",
-            title=f"Requested Data Percent per Request Size ({disk_name})",
+            title=f"Data Requested per Request Size ({disk_name})",
             text="Percent",
             custom_data=["IO Type", "Percent", "Total Size"],
         )
