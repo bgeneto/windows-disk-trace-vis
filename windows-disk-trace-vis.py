@@ -18,12 +18,13 @@ History:  v1.0.0 Initial release
           v1.0.9 Better graph title.
           v1.0.10 Better graphics titles
           v1.0.11 Renamed graphics title
-Modified: 20240502
+          v1.0.12 Fixed UnhashableParamError / LargeUtf8
+Modified: 20260204
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.11"
+__VERSION__ = "1.0.12"
 
 import base64
 import urllib.error
@@ -35,6 +36,11 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+try:
+    pd.options.mode.string_storage = "python"
+except (AttributeError, KeyError):
+    pass
 
 app_title = "Windows Disk Trace Visualizer"
 
@@ -157,6 +163,17 @@ def locale_adjust_numbers(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def ensure_python_string_columns(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Force Python-backed string storage for specific columns to avoid Arrow LargeUtf8."""
+    for col in columns:
+        if col in data.columns:
+            try:
+                data[col] = data[col].astype("string[python]")
+            except TypeError:
+                data[col] = data[col].astype(str)
+    return data
+
+
 @st.cache_data
 def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     """Read the uploaded file using pandas."""
@@ -179,6 +196,11 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
         dtype=column_types,
         compression=compression,
         skiprows=1,
+    )
+
+    data = ensure_python_string_columns(
+        data,
+        ["IO Type", "Priority", "Process Name", "Min Offset", "Max Offset"],
     )
 
     # Drop rows where "IO Type" is not "Read" or "Write"
@@ -1066,7 +1088,6 @@ def download_custom_profile() -> Optional[bytes]:
     return custom_profile
 
 
-@st.cache_data
 def remove_disk(
     data: pd.DataFrame, disks_names: list[str], selected_disks: list[str]
 ) -> pd.DataFrame:
