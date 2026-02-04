@@ -1,5 +1,6 @@
-altair<5
-pandas
-plotly
-plotly-express
-streamlit
+altair==4.2.2
+pandas==2.1.4
+plotly==5.18.0
+plotly-express==0.4.1
+pyarrow==14.0.2
+streamlit==1.31.1
