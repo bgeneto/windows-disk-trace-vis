@@ -19,12 +19,13 @@ History:  v1.0.0 Initial release
           v1.0.10 Better graphics titles
           v1.0.11 Renamed graphics title
           v1.0.12 Fixed UnhashableParamError / LargeUtf8
+          v1.0.13 Add Queue Depth, QoS, Misalignment, and Throughput over time analysis, and improve latency calculations with weighted quantiles.
 Modified: 20260204
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
 
-__VERSION__ = "1.0.12"
+__VERSION__ = "1.0.13"
 
 import base64
 import urllib.error
@@ -128,6 +129,16 @@ def render_svg(svg, width="100%", height="100%") -> str:
     return html
 
 
+def weighted_quantile(
+    df: pd.DataFrame, val_col: str, weight_col: str, q: float
+) -> float:
+    """Calculate weighted quantile."""
+    df_sorted = df.sort_values(val_col)
+    cumsum = df_sorted[weight_col].cumsum()
+    cutoff = df_sorted[weight_col].sum() * q
+    return df_sorted[cumsum >= cutoff][val_col].iloc[0]
+
+
 def locale_adjust_numbers(data: pd.DataFrame) -> pd.DataFrame:
     """Check number format and adjust data accordingly."""
     int_cols = ["Size (B)"]
@@ -223,14 +234,19 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     # Order by disk and time to correctly classify SEQ/RND per disk
     data = data.sort_values(by=["Disks", "Init Time (s)"], ignore_index=True)
 
-    # Classify the operation type as "SEQ" or "RND" per disk
+    # Classify the operation type as "SEQ" or "RND" per disk and process
     # Compare the "Max Offset" from previous row with the "Min Offset" from current row
-    # Only within the same disk - first request per disk is always RND
+    # Use a spatial locality threshold (1MB = 1048576 bytes)
     def classify_seq_rnd(group: pd.DataFrame) -> pd.Series:
+        group = group.sort_values(by="Init Time (s)")
         prev_max = group["Max Offset"].shift(1)
-        return np.where(group["Min Offset"] == prev_max + 1, "SEQ", "RND")
+        # Check if difference between current Min and prev Max is within threshold
+        diff = (group["Min Offset"] - prev_max).abs()
+        # 1MB threshold for spatial locality (common in SSD prefetching)
+        threshold = 1048576
+        return np.where(diff <= threshold, "SEQ", "RND")
 
-    data["Category"] = data.groupby("Disks", group_keys=False).apply(
+    data["Category"] = data.groupby(["Disks", "Process Name"], group_keys=False).apply(
         lambda g: pd.Series(classify_seq_rnd(g), index=g.index)
     )
 
@@ -256,33 +272,26 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
         data["Complete Time (s)"].max()
     )
 
-    # average time for each operation
+    # Weighted average time for each operation
+    total_ios = data["Count"].sum()
+    total_disk_time_weighted = (data["Count"] * data["Disk Service Time (µs)"]).sum()
     summary["Average access time"] = "{:.2f} µs".format(
-        data["Disk Service Time (µs)"].mean()
+        total_disk_time_weighted / total_ios
     )
 
-    # Latency percentiles (P50 and P99) - more representative than mean for skewed distributions
+    # Weighted Latency percentiles (P50 and P99)
     summary["P50 access time (median)"] = "{:.2f} µs".format(
-        data["Disk Service Time (µs)"].quantile(0.50)
+        weighted_quantile(data, "Disk Service Time (µs)", "Count", 0.50)
     )
     summary["P99 access time"] = "{:.2f} µs".format(
-        data["Disk Service Time (µs)"].quantile(0.99)
+        weighted_quantile(data, "Disk Service Time (µs)", "Count", 0.99)
     )
 
     # Calculate weighted totals using Count column for correctness
     # Each row may represent multiple I/O operations (Count >= 1)
-    total_ios = (data["Count"]).sum()  # Weighted by Count
-    total_bytes = (data["Count"] * data["Size (B)"]).sum()  # Weighted by Count
     # Disk service time is per-request, so weight by Count for total busy time
     total_disk_time_sec = (data["Count"] * data["Disk Service Time (µs)"]).sum() * 1e-6
-
-    # Calculate IOPS (I/O operations per second of disk busy time)
-    effective_iops = total_ios / total_disk_time_sec
-    summary["Effective IOPS"] = "{:.2f}k".format(effective_iops / 1000)
-
-    # Calculate effective throughput (during disk busy time)
-    effective_throughput = (total_bytes / toMB) / total_disk_time_sec
-    summary["Effective throughput"] = "{:.2f} MB/s".format(effective_throughput)
+    total_bytes = (data["Count"] * data["Size (B)"]).sum()  # Weighted by Count
 
     # Calculate observed throughput (wall-clock time)
     monitoring_time_sec = data["Complete Time (s)"].max()
@@ -525,8 +534,8 @@ def outlier_thresholds_iqr(data: pd.DataFrame, col_name: str, lth=0.05, uth=0.95
         float: The lower outlier threshold.
         float: The upper outlier threshold.
     """
-    quartile1 = data[col_name].quantile(lth)
-    quartile3 = data[col_name].quantile(uth)
+    quartile1 = weighted_quantile(data, col_name, "Count", lth)
+    quartile3 = weighted_quantile(data, col_name, "Count", uth)
     iqr = quartile3 - quartile1
     upper_limit = quartile3 + 1.5 * iqr
     lower_limit = quartile1 - 1.5 * iqr
@@ -547,9 +556,10 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         ]
 
     # average access time by disk
-    df = fdf.groupby(["Disks"])[
-        "Disk Service Time (µs)"
-    ].mean()  # Reset index to access "Disks" as a column
+    df = fdf.groupby(["Disks"]).apply(
+        lambda x: (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+    )
+    df.name = "Disk Service Time (µs)"
 
     # Create Plotly bar plot
     fig = px.bar(
@@ -575,7 +585,10 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         st.dataframe(df)
 
     # average by disk and by request type
-    df = fdf.groupby(["Disks", "IO Type"])["Disk Service Time (µs)"].mean()
+    df = fdf.groupby(["Disks", "IO Type"]).apply(
+        lambda x: (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+    )
+    df.name = "Disk Service Time (µs)"
 
     # Create an interactive grouped bar plot using Plotly
     fig = px.bar(
@@ -1155,6 +1168,176 @@ def show_service_time_process(data: pd.DataFrame):
             st.dataframe(df)
 
 
+def show_queue_depth_info(data: pd.DataFrame):
+    """Show Queue Depth (QD) statistics and charts."""
+
+    # 1. Average QD per Disk
+    df_qd_disk = data.groupby("Disks")[["QD/I", "QD/C"]].mean().reset_index()
+
+    fig_qd = px.bar(
+        df_qd_disk.melt(
+            id_vars="Disks", var_name="Metric", value_name="Avg Queue Depth"
+        ),
+        x="Disks",
+        y="Avg Queue Depth",
+        color="Metric",
+        barmode="group",
+        title="Average Queue Depth per Disk (Init vs Complete)",
+    )
+    st.plotly_chart(fig_qd, use_container_width=True)
+
+    # 2. Latency vs Queue Depth (Scatter Plot with binning)
+    # We bin QD to make the chart readable
+    data["QD_Bin"] = pd.cut(
+        data["QD/C"],
+        bins=[0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 9999],
+        labels=[
+            "1",
+            "2",
+            "3-4",
+            "5-8",
+            "9-16",
+            "17-32",
+            "33-64",
+            "65-128",
+            "129-256",
+            ">256",
+        ],
+    )
+
+    df_lat_qd = (
+        data.groupby(["Disks", "QD_Bin"])
+        .apply(
+            lambda x: (
+                (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+                if x["Count"].sum() > 0
+                else 0
+            )
+        )
+        .reset_index(name="Avg Latency (µs)")
+    )
+
+    fig_lat_qd = px.line(
+        df_lat_qd,
+        x="QD_Bin",
+        y="Avg Latency (µs)",
+        color="Disks",
+        markers=True,
+        title="Average Latency vs Queue Depth (QD/C)",
+        labels={"QD_Bin": "Queue Depth Range"},
+    )
+    st.plotly_chart(fig_lat_qd, use_container_width=True)
+
+    with st.expander("Show QD Data"):
+        st.dataframe(df_lat_qd)
+
+
+def show_qos_analysis(data: pd.DataFrame):
+    """Show Quality of Service (QoS) analysis."""
+    # Define latency buckets
+    # <100us (Excellent), 100-500us (Good), 500us-1ms (Fair), 1-10ms (Poor), >10ms (Bad)
+    bins = [0, 100, 500, 1000, 10000, 999999999]
+    labels = ["<100µs", "100-500µs", "500µs-1ms", "1-10ms", ">10ms"]
+
+    data["LatencyBucket"] = pd.cut(
+        data["Disk Service Time (µs)"], bins=bins, labels=labels
+    )
+
+    # Calculate percentage of requests in each bucket per disk (Weighted by Count)
+    df_qos = (
+        data.groupby(["Disks", "LatencyBucket"])
+        .apply(lambda x: x["Count"].sum())
+        .reset_index(name="Request Count")
+    )
+
+    # Calculate percentages
+    df_qos["Percent"] = (
+        df_qos["Request Count"]
+        / df_qos.groupby("Disks")["Request Count"].transform("sum")
+        * 100
+    )
+
+    fig = px.bar(
+        df_qos,
+        x="Disks",
+        y="Percent",
+        color="LatencyBucket",
+        title="Latency QoS Distribution (Percentage of I/Os)",
+        color_discrete_map={
+            "<100µs": "#00CC96",  # Green
+            "100-500µs": "#636EFA",  # Blue
+            "500µs-1ms": "#AB63FA",  # Purple
+            "1-10ms": "#FFA15A",  # Orange
+            ">10ms": "#EF553B",  # Red
+        },
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Show QoS Data"):
+        st.dataframe(df_qos)
+
+
+def show_misalignment_analysis(data: pd.DataFrame):
+    """Show Misaligned I/O analysis."""
+    # Check alignment (assuming 4096 sector size)
+    data["IsMisaligned"] = data["Min Offset"] % 4096 != 0
+
+    misaligned_data = data[data["IsMisaligned"] == True]
+
+    if misaligned_data.empty:
+        st.success("No misaligned I/O detected! (All I/Os are 4K aligned)")
+        return
+
+    num_misaligned = misaligned_data["Count"].sum()
+    total_ios = data["Count"].sum()
+    percent_misaligned = (num_misaligned / total_ios) * 100
+
+    st.warning(
+        f"⚠️ Detected {num_misaligned} misaligned I/O operations ({percent_misaligned:.2f}% of total)."
+    )
+    st.write("Misaligned I/Os cause Read-Modify-Write overhead on SSDs.")
+
+    # Show culprits (Processes)
+    df_culprits = (
+        misaligned_data.groupby("Process Name")["Count"]
+        .sum()
+        .reset_index()
+        .sort_values("Count", ascending=False)
+        .head(10)
+    )
+
+    fig = px.bar(
+        df_culprits,
+        x="Process Name",
+        y="Count",
+        title="Top Processes causing Misaligned I/O",
+        color="Process Name",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def show_throughput_over_time(data: pd.DataFrame):
+    """Show Throughput over time."""
+    # Bin by integer second
+    data["TimeBin"] = data["Init Time (s)"].astype(int)
+
+    # Calculate MB/s per bin (Sum of Size / 1s)
+    df_time = (
+        data.groupby(["Disks", "TimeBin", "IO Type"])["Size (B)"].sum().reset_index()
+    )
+    df_time["Throughput (MB/s)"] = df_time["Size (B)"] / toMB
+
+    fig = px.line(
+        df_time,
+        x="TimeBin",
+        y="Throughput (MB/s)",
+        color="Disks",
+        line_dash="IO Type",
+        title="Throughput Monitor (MB/s over Time)",
+        labels={"TimeBin": "Time (seconds)"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def initial_sidebar_config():
     # sidebar contents
     sidebar = st.sidebar
@@ -1380,7 +1563,32 @@ def main():
     show_performance(data, filter_size)
     show_request_size_iops(data)
     show_request_size_process(data)
+    show_request_size_process(data)
     show_service_time_process(data)
+
+    st.header(":traffic_light: Queue Depth Analysis")
+    with st.expander("Show info"):
+        st.write(
+            """
+             **Queue Depth (QD)** represents the number of pending I/O requests at a given instant.
+             *   **QD/I (Init)**: Queue depth when the request was issued.
+             *   **QD/C (Complete)**: Queue depth when the request was completed.
+             
+             Modern NVMe SSDs are designed to handle high parallelism (High QD). 
+             If latency increases linearly with QD, the drive is saturating.
+             """
+        )
+    show_queue_depth_info(data)
+
+    st.header(":chart_with_downwards_trend: Advanced Diagnostics")
+    st.subheader("1. Quality of Service (Latency QoS)")
+    show_qos_analysis(data)
+
+    st.subheader("2. I/O Alignment Analysis")
+    show_misalignment_analysis(data)
+
+    st.subheader("3. Temporal Analysis (Throughput over Time)")
+    show_throughput_over_time(data)
 
 
 if __name__ == "__main__":
