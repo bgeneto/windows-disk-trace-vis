@@ -163,7 +163,9 @@ def locale_adjust_numbers(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def ensure_python_string_columns(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+def ensure_python_string_columns(
+    data: pd.DataFrame, columns: list[str]
+) -> pd.DataFrame:
     """Force Python-backed string storage for specific columns to avoid Arrow LargeUtf8."""
     for col in columns:
         if col in data.columns:
@@ -211,21 +213,25 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
 
     data = locale_adjust_numbers(data)
 
-    # Order the DataFrame by "Init Time (s)" column in order to calculate the difference between max offsets and min offsets
-    # and categorize the operation type as "SEQ" or "RND"
-    data = data.sort_values(by=["Init Time (s)"], ignore_index=True)
-
     # Convert "Disks" to string so plotly can recognize it as categorical (not numerical, continuous)
     data["Disks"] = "Disk " + data["Disks"].astype(str)
 
-    # Convert "Min Offset" and "Max Offset" from hex to int
-    data["Min Offset"] = data["Min Offset"].apply(lambda x: int(x, 16))
-    data["Max Offset"] = data["Max Offset"].apply(lambda x: int(x, 16))
+    # Convert "Min Offset" and "Max Offset" from hex to int (vectorized for performance)
+    data["Min Offset"] = data["Min Offset"].map(lambda x: int(x, 16))
+    data["Max Offset"] = data["Max Offset"].map(lambda x: int(x, 16))
 
-    # Classify the operation type as "SEQ" or "RND" by comparing the "Max Offset" from previous row with the "Min Offset" from current row
-    # Calculate the difference between max offsets and min offsets
-    data["Category"] = np.where(
-        data["Min Offset"] == data["Max Offset"].shift(1) + 1, "SEQ", "RND"
+    # Order by disk and time to correctly classify SEQ/RND per disk
+    data = data.sort_values(by=["Disks", "Init Time (s)"], ignore_index=True)
+
+    # Classify the operation type as "SEQ" or "RND" per disk
+    # Compare the "Max Offset" from previous row with the "Min Offset" from current row
+    # Only within the same disk - first request per disk is always RND
+    def classify_seq_rnd(group: pd.DataFrame) -> pd.Series:
+        prev_max = group["Max Offset"].shift(1)
+        return np.where(group["Min Offset"] == prev_max + 1, "SEQ", "RND")
+
+    data["Category"] = data.groupby("Disks", group_keys=False).apply(
+        lambda g: pd.Series(classify_seq_rnd(g), index=g.index)
     )
 
     return data.dropna(how="any")
@@ -255,18 +261,41 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
         data["Disk Service Time (µs)"].mean()
     )
 
-    summary["Average IOPS"] = "{:.2f}k".format(
-        data["Size (B)"].count() / (data["Disk Service Time (µs)"].sum() * 1e-3)
+    # Latency percentiles (P50 and P99) - more representative than mean for skewed distributions
+    summary["P50 access time (median)"] = "{:.2f} µs".format(
+        data["Disk Service Time (µs)"].quantile(0.50)
+    )
+    summary["P99 access time"] = "{:.2f} µs".format(
+        data["Disk Service Time (µs)"].quantile(0.99)
     )
 
-    # average throughput
-    summary["Average throughput"] = "{:.2f} MB/s".format(
-        (data["Size (B)"].sum() / toMB) / (data["Disk Service Time (µs)"].sum() * 1e-6)
-    )
+    # Calculate weighted totals using Count column for correctness
+    # Each row may represent multiple I/O operations (Count >= 1)
+    total_ios = (data["Count"]).sum()  # Weighted by Count
+    total_bytes = (data["Count"] * data["Size (B)"]).sum()  # Weighted by Count
+    # Disk service time is per-request, so weight by Count for total busy time
+    total_disk_time_sec = (data["Count"] * data["Disk Service Time (µs)"]).sum() * 1e-6
 
-    # number of read and write requests
-    summary["Read requests"] = data[data["IO Type"] == "Read"].shape[0]
-    summary["Write requests"] = data[data["IO Type"] == "Write"].shape[0]
+    # Calculate IOPS (I/O operations per second of disk busy time)
+    effective_iops = total_ios / total_disk_time_sec
+    summary["Effective IOPS"] = "{:.2f}k".format(effective_iops / 1000)
+
+    # Calculate effective throughput (during disk busy time)
+    effective_throughput = (total_bytes / toMB) / total_disk_time_sec
+    summary["Effective throughput"] = "{:.2f} MB/s".format(effective_throughput)
+
+    # Calculate observed throughput (wall-clock time)
+    monitoring_time_sec = data["Complete Time (s)"].max()
+    observed_throughput = (total_bytes / toMB) / monitoring_time_sec
+    summary["Observed throughput"] = "{:.2f} MB/s".format(observed_throughput)
+
+    # Calculate observed IOPS (wall-clock time)
+    observed_iops = total_ios / monitoring_time_sec
+    summary["Observed IOPS"] = "{:.2f}".format(observed_iops)
+
+    # number of read and write requests (weighted by Count)
+    summary["Read requests"] = int(data[data["IO Type"] == "Read"]["Count"].sum())
+    summary["Write requests"] = int(data[data["IO Type"] == "Write"]["Count"].sum())
 
     # total requests
     summary["Total requests"] = summary["Read requests"] + summary["Write requests"]
@@ -279,12 +308,12 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
         summary["Write requests"] / summary["Total requests"] * 100
     )
 
-    # total percentage SEQ and RND requests
+    # total percentage SEQ and RND requests (weighted by Count)
     summary["Percent RANDOM"] = "{:.2f}%".format(
-        data[data["Category"] == "RND"].shape[0] / summary["Total requests"] * 100
+        data[data["Category"] == "RND"]["Count"].sum() / summary["Total requests"] * 100
     )
     summary["Percent SEQUENTIAL"] = "{:.2f}%".format(
-        data[data["Category"] == "SEQ"].shape[0] / summary["Total requests"] * 100
+        data[data["Category"] == "SEQ"]["Count"].sum() / summary["Total requests"] * 100
     )
 
     # total data read in GBytes
@@ -563,9 +592,16 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # average throughput by disk
-    total_time_sec = fdf.groupby(["Disks"])["Disk Service Time (µs)"].sum() * 1e-6
-    df = (fdf.groupby(["Disks"])["Size (B)"].sum() / toMB) / total_time_sec
+    # average throughput by disk (weighted by Count for correctness)
+    total_time_sec = (
+        fdf.groupby(["Disks"]).apply(
+            lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
+        )
+    ) * 1e-6
+    total_bytes = fdf.groupby(["Disks"]).apply(
+        lambda g: (g["Count"] * g["Size (B)"]).sum()
+    )
+    df = (total_bytes / toMB) / total_time_sec
     df.rename("Average Throughput (MB/s)", inplace=True)
 
     fig = px.bar(
@@ -582,11 +618,16 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # average throughput by disk and by IO type
+    # average throughput by disk and by IO type (weighted by Count)
     total_time_sec = (
-        fdf.groupby(["Disks", "IO Type"])["Disk Service Time (µs)"].sum() * 1e-6
+        fdf.groupby(["Disks", "IO Type"]).apply(
+            lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
+        )
+    ) * 1e-6
+    total_bytes = fdf.groupby(["Disks", "IO Type"]).apply(
+        lambda g: (g["Count"] * g["Size (B)"]).sum()
     )
-    df = (fdf.groupby(["Disks", "IO Type"])["Size (B)"].sum() / toMB) / total_time_sec
+    df = (total_bytes / toMB) / total_time_sec
 
     # Create an interactive grouped bar plot using Plotly
     fig = px.bar(
@@ -603,23 +644,21 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # average throughput per category
+    # average throughput per category (weighted by Count)
     disks_names = sorted(data["Disks"].unique().tolist())
     for disk_name in disks_names:
+        disk_data = fdf[fdf["Disks"] == disk_name]
         total_time_sec = (
-            fdf[fdf["Disks"] == disk_name]
-            .groupby(["IO Type", "Category"])["Disk Service Time (µs)"]
-            .sum()
-            * 1e-6
+            disk_data.groupby(["IO Type", "Category"]).apply(
+                lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
+            )
+        ) * 1e-6
+
+        total_bytes = disk_data.groupby(["IO Type", "Category"]).apply(
+            lambda g: (g["Count"] * g["Size (B)"]).sum()
         )
 
-        df = (
-            fdf[data["Disks"] == disk_name]
-            .groupby(["IO Type", "Category"])["Size (B)"]
-            .sum()
-            / toMB
-        ) / total_time_sec
-
+        df = (total_bytes / toMB) / total_time_sec
         df.rename("Average Throughput (MB/s)", inplace=True)
 
         # Create an interactive grouped bar plot using Plotly
@@ -639,11 +678,14 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         with st.expander("Show data"):
             st.dataframe(df)
 
-    # average IOPS
+    # average IOPS (weighted by Count)
     total_time_sec = (
-        fdf.groupby(["Disks", "IO Type"])["Disk Service Time (µs)"].sum() * 1e-6
-    )
-    df = fdf.groupby(["Disks", "IO Type"])["Size (B)"].count() / total_time_sec
+        fdf.groupby(["Disks", "IO Type"]).apply(
+            lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
+        )
+    ) * 1e-6
+    total_ios = fdf.groupby(["Disks", "IO Type"])["Count"].sum()
+    df = total_ios / total_time_sec
 
     # Create an interactive grouped bar plot using Plotly
     fig = px.bar(
@@ -663,6 +705,59 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
 
 def custom_int_float_format(value):
     return "{:.1f}".format(value) if value % 1 else "{:.0f}".format(value)
+
+
+def show_request_size_histogram(data: pd.DataFrame):
+    """Show request size distribution as a histogram."""
+    for disk_name in sorted(data["Disks"].unique().tolist()):
+        df = data[data["Disks"] == disk_name].copy()
+
+        # Convert size to KB for better readability
+        df["Size (KB)"] = df["Size (B)"] / toKB
+
+        # Create histogram with separate traces for Read/Write
+        fig = px.histogram(
+            df,
+            x="Size (KB)",
+            color="IO Type",
+            color_discrete_map=io_type_color_mapping,
+            barmode="overlay",
+            nbins=50,
+            title=f"Request Size Distribution ({disk_name})",
+            labels={"Size (KB)": "Request Size (KB)", "count": "Frequency"},
+            opacity=0.7,
+        )
+
+        fig.update_layout(
+            xaxis_title="Request Size (KB)",
+            yaxis_title="Frequency (number of requests)",
+            bargap=0.1,
+        )
+
+        # Add logarithmic scale option for better visualization of skewed data
+        fig.update_xaxes(type="log")
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("Show statistics"):
+            stats_df = (
+                df.groupby("IO Type")["Size (KB)"]
+                .agg(
+                    [
+                        ("Min", "min"),
+                        ("Max", "max"),
+                        ("Mean", "mean"),
+                        ("Median", "median"),
+                        ("Std Dev", "std"),
+                    ]
+                )
+                .round(2)
+            )
+            st.dataframe(stats_df)
+            st.write(
+                "> **Note:** The histogram uses a logarithmic x-axis scale to better visualize "
+                "the distribution of request sizes, which typically spans several orders of magnitude."
+            )
 
 
 def show_request_size_count(data: pd.DataFrame):
@@ -966,7 +1061,7 @@ def show_request_size_process(data: pd.DataFrame):
     """Compute request data size per process."""
     for disk_name in sorted(data["Disks"].unique().tolist()):
         df = data[data["Disks"] == disk_name].copy()
-        df["Total Size"] = data["Count"] * data["Size (B)"]
+        df["Total Size"] = df["Count"] * df["Size (B)"]
 
         df = (df.groupby(["Process Name", "IO Type"])["Total Size"].sum()).to_frame()
 
@@ -1195,9 +1290,11 @@ def main():
         selected_disks = placeholder.multiselect(
             label="Disks to display:",
             options=disks_names,
-            default=st.session_state.selected_disks
-            if "selected_disks" in st.session_state
-            else disks_names,
+            default=(
+                st.session_state.selected_disks
+                if "selected_disks" in st.session_state
+                else disks_names
+            ),
             key="selected_disks",
         )
         if selected_disks:
@@ -1265,6 +1362,7 @@ def main():
             """
         )
     show_request_size_count(data)
+    show_request_size_histogram(data)
     show_request_size_time(data)
     show_request_size_bytes(data)
 
