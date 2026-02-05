@@ -234,19 +234,28 @@ def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     # Order by disk and time to correctly classify SEQ/RND per disk
     data = data.sort_values(by=["Disks", "Init Time (s)"], ignore_index=True)
 
-    # Classify the operation type as "SEQ" or "RND" per disk and process
+    # Classify the operation type as "SEQ" or "RND" per disk
     # Compare the "Max Offset" from previous row with the "Min Offset" from current row
     # Use a spatial locality threshold (1MB = 1048576 bytes)
+    # Also enforce same IO type and a small time gap to reduce false positives
     def classify_seq_rnd(group: pd.DataFrame) -> pd.Series:
         group = group.sort_values(by="Init Time (s)")
         prev_max = group["Max Offset"].shift(1)
-        # Check if difference between current Min and prev Max is within threshold
-        diff = (group["Min Offset"] - prev_max).abs()
-        # 1MB threshold for spatial locality (common in SSD prefetching)
+        prev_time = group["Init Time (s)"].shift(1)
+        prev_io = group["IO Type"].shift(1)
+        diff = group["Min Offset"] - prev_max
+        time_gap = (group["Init Time (s)"] - prev_time).abs()
         threshold = 1048576
-        return np.where(diff <= threshold, "SEQ", "RND")
+        time_threshold = 0.01  # 10 ms
+        is_seq = (
+            (prev_io == group["IO Type"])
+            & (diff >= 0)
+            & (diff <= threshold)
+            & (time_gap <= time_threshold)
+        )
+        return pd.Series(np.where(is_seq, "SEQ", "RND"), index=group.index)
 
-    data["Category"] = data.groupby(["Disks", "Process Name"], group_keys=False).apply(
+    data["Category"] = data.groupby(["Disks"], group_keys=False).apply(
         lambda g: pd.Series(classify_seq_rnd(g), index=g.index)
     )
 
@@ -267,10 +276,11 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
 
     summary = {}
 
-    # Compute the total monitoring time by taking the max value from the "Time" column
-    summary["Monitoring time"] = "{:.2f} seconds".format(
-        data["Complete Time (s)"].max()
-    )
+    # Compute the total monitoring time using wall-clock duration
+    start_time = data["Init Time (s)"].min()
+    end_time = data["Complete Time (s)"].max()
+    monitoring_time_sec = max(end_time - start_time, 0)
+    summary["Monitoring time"] = "{:.2f} seconds".format(monitoring_time_sec)
 
     # Weighted average time for each operation
     total_ios = data["Count"].sum()
@@ -294,12 +304,13 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
     total_bytes = (data["Count"] * data["Size (B)"]).sum()  # Weighted by Count
 
     # Calculate observed throughput (wall-clock time)
-    monitoring_time_sec = data["Complete Time (s)"].max()
-    observed_throughput = (total_bytes / toMB) / monitoring_time_sec
+    observed_throughput = (
+        (total_bytes / toMB) / monitoring_time_sec if monitoring_time_sec > 0 else 0
+    )
     summary["Observed throughput"] = "{:.2f} MB/s".format(observed_throughput)
 
     # Calculate observed IOPS (wall-clock time)
-    observed_iops = total_ios / monitoring_time_sec
+    observed_iops = total_ios / monitoring_time_sec if monitoring_time_sec > 0 else 0
     summary["Observed IOPS"] = "{:.2f}".format(observed_iops)
 
     # number of read and write requests (weighted by Count)
@@ -341,18 +352,23 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
         (data["Count"] * data["Size (B)"]).sum() / toGB
     )
 
-    # min and max readrequests in KB
+    read_data = data[data["IO Type"] == "Read"]
+    write_data = data[data["IO Type"] == "Write"]
+
+    # min and max read requests in KB
     summary["Min. read request size"] = "{:.1f} KB".format(
-        (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).min() / toKB
+        read_data["Size (B)"].min() / toKB
     )
 
-    # avg read request in KB
+    # avg read request in KB (weighted by Count)
     summary["Avg. read request size"] = "{:.1f} KB".format(
-        (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).mean() / toKB
+        (read_data["Size (B)"] * read_data["Count"]).sum()
+        / read_data["Count"].sum()
+        / toKB
     )
 
     # max read requests in KB
-    number = (data["Count"] * data[data["IO Type"] == "Read"]["Size (B)"]).max() / toKB
+    number = read_data["Size (B)"].max() / toKB
     formatted_number = (
         "{:.1f}".format(number) if number % 1 else "{:.0f}".format(number)
     )
@@ -360,16 +376,18 @@ def log_summary(data: pd.DataFrame) -> pd.DataFrame:
 
     # min and max write requests in KB
     summary["Min. write request size"] = "{:.1f} KB".format(
-        (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).min() / toKB
+        write_data["Size (B)"].min() / toKB
     )
 
-    # avg write request in KB
+    # avg write request in KB (weighted by Count)
     summary["Avg. write request size"] = "{:.1f} KB".format(
-        (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).mean() / toKB
+        (write_data["Size (B)"] * write_data["Count"]).sum()
+        / write_data["Count"].sum()
+        / toKB
     )
 
     # max write requests in KB
-    number = (data["Count"] * data[data["IO Type"] == "Write"]["Size (B)"]).max() / toKB
+    number = write_data["Size (B)"].max() / toKB
     formatted_number = (
         "{:.1f}".format(number) if number % 1 else "{:.0f}".format(number)
     )
@@ -542,33 +560,37 @@ def outlier_thresholds_iqr(data: pd.DataFrame, col_name: str, lth=0.05, uth=0.95
     return lower_limit, upper_limit
 
 
-def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = False):
+def show_performance(
+    data: pd.DataFrame,
+    filter_size,
+    latency_col: str,
+    remove_outliers: bool = False,
+):
     """Compute disk access time and other performance metrics."""
     # Remove outliers
     fdf = data
     if remove_outliers:
-        _, ub = outlier_thresholds_iqr(data, "Disk Service Time (µs)", 0.01, 0.99)
+        _, ub = outlier_thresholds_iqr(data, latency_col, 0.01, 0.99)
 
         # Filter the DataFrame based on quartiles
-        fdf = data[
-            (data["Disk Service Time (µs)"] > 0)
-            & (data["Disk Service Time (µs)"] <= ub)
-        ]
+        fdf = data[(data[latency_col] > 0) & (data[latency_col] <= ub)]
+        removed_pct = (1 - (fdf["Count"].sum() / data["Count"].sum())) * 100
+        st.caption(f"Outlier filter removed {removed_pct:.2f}% of I/Os.")
 
     # average access time by disk
     df = fdf.groupby(["Disks"]).apply(
-        lambda x: (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+        lambda x: (x[latency_col] * x["Count"]).sum() / x["Count"].sum()
     )
-    df.name = "Disk Service Time (µs)"
+    df.name = latency_col
 
     # Create Plotly bar plot
     fig = px.bar(
         df.reset_index(),
         x="Disks",
-        y="Disk Service Time (µs)",
-        title="Average Access Time",
+        y=latency_col,
+        title=f"Average Access Time [{latency_col}]",
         color="Disks",
-        labels={"Disk Service Time (µs)": "Average Access Time (µs)"},
+        labels={latency_col: f"Average Access Time [{latency_col}]"},
     )
 
     # Set x-axis tickmode to "array" and provide the index values to only show those
@@ -586,9 +608,9 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
 
     # average by disk and by request type
     df = fdf.groupby(["Disks", "IO Type"]).apply(
-        lambda x: (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+        lambda x: (x[latency_col] * x["Count"]).sum() / x["Count"].sum()
     )
-    df.name = "Disk Service Time (µs)"
+    df.name = latency_col
 
     # Create an interactive grouped bar plot using Plotly
     fig = px.bar(
@@ -596,8 +618,8 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         color="IO Type",
         color_discrete_map=io_type_color_mapping,
         barmode="group",
-        title="Average Access Time per IO Type",
-        labels={"value": "Average Access Time (µs)"},
+        title=f"Average Access Time per IO Type [{latency_col}]",
+        labels={"value": f"Average Access Time [{latency_col}]"},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -615,15 +637,15 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         lambda g: (g["Count"] * g["Size (B)"]).sum()
     )
     df = (total_bytes / toMB) / total_time_sec
-    df.rename("Average Throughput (MB/s)", inplace=True)
+    df.rename("Service-rate Throughput (MB/s)", inplace=True)
 
     fig = px.bar(
         df.reset_index(),
         x="Disks",
         y="Average Throughput (MB/s)",
         color="Disks",
-        title="Average Throughput",
-        labels={"value": "Average Throughput (MB/s)"},
+        title="Service-rate Throughput",
+        labels={"value": "Service-rate Throughput (MB/s)"},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -631,7 +653,30 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # average throughput by disk and by IO type (weighted by Count)
+    # observed throughput by disk (wall-clock time)
+    duration_sec = fdf.groupby(["Disks"]).apply(
+        lambda g: g["Complete Time (s)"].max() - g["Init Time (s)"].min()
+    )
+    duration_sec = duration_sec.where(duration_sec > 0, np.nan)
+    df = (total_bytes / toMB) / duration_sec
+    df = df.fillna(0)
+    df.rename("Observed Throughput (MB/s)", inplace=True)
+
+    fig = px.bar(
+        df.reset_index(),
+        x="Disks",
+        y="Observed Throughput (MB/s)",
+        color="Disks",
+        title="Observed Throughput (Wall-clock)",
+        labels={"value": "Observed Throughput (MB/s)"},
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show data"):
+        st.dataframe(df)
+
+    # service-rate throughput by disk and by IO type (weighted by Count)
     total_time_sec = (
         fdf.groupby(["Disks", "IO Type"]).apply(
             lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
@@ -648,8 +693,8 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         color="IO Type",
         color_discrete_map=io_type_color_mapping,
         barmode="group",
-        title="Average Throughput per IO Type",
-        labels={"value": "Average Throughput (MB/s)"},
+        title="Service-rate Throughput per IO Type",
+        labels={"value": "Service-rate Throughput (MB/s)"},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -657,7 +702,29 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
     with st.expander("Show data"):
         st.dataframe(df)
 
-    # average throughput per category (weighted by Count)
+    # observed throughput by disk and IO type (wall-clock time)
+    duration_sec = fdf.groupby(["Disks", "IO Type"]).apply(
+        lambda g: g["Complete Time (s)"].max() - g["Init Time (s)"].min()
+    )
+    duration_sec = duration_sec.where(duration_sec > 0, np.nan)
+    df = (total_bytes / toMB) / duration_sec
+    df = df.fillna(0)
+
+    fig = px.bar(
+        df.unstack(),
+        color="IO Type",
+        color_discrete_map=io_type_color_mapping,
+        barmode="group",
+        title="Observed Throughput per IO Type (Wall-clock)",
+        labels={"value": "Observed Throughput (MB/s)"},
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show data"):
+        st.dataframe(df)
+
+    # service-rate throughput per category (weighted by Count)
     disks_names = sorted(data["Disks"].unique().tolist())
     for disk_name in disks_names:
         disk_data = fdf[fdf["Disks"] == disk_name]
@@ -672,18 +739,18 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         )
 
         df = (total_bytes / toMB) / total_time_sec
-        df.rename("Average Throughput (MB/s)", inplace=True)
+        df.rename("Service-rate Throughput (MB/s)", inplace=True)
 
         # Create an interactive grouped bar plot using Plotly
         fig = px.bar(
             df.reset_index(),
             x="Category",
-            y="Average Throughput (MB/s)",
+            y="Service-rate Throughput (MB/s)",
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="group",
-            title=f"Average Throughput per IO Type and Category ({disk_name})",
-            labels={"value": "Average Throughput (MB/s)"},
+            title=f"Service-rate Throughput per IO Type and Category ({disk_name})",
+            labels={"value": "Service-rate Throughput (MB/s)"},
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -691,7 +758,7 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         with st.expander("Show data"):
             st.dataframe(df)
 
-    # average IOPS (weighted by Count)
+    # service-rate IOPS (weighted by Count)
     total_time_sec = (
         fdf.groupby(["Disks", "IO Type"]).apply(
             lambda g: (g["Count"] * g["Disk Service Time (µs)"]).sum()
@@ -706,8 +773,31 @@ def show_performance(data: pd.DataFrame, filter_size, remove_outliers: bool = Fa
         color="IO Type",
         color_discrete_map=io_type_color_mapping,
         barmode="group",
-        title=f"Average IOPS (size: {filter_size} KB)",
-        labels={"value": "Average IOPS"},
+        title=f"Service-rate IOPS (size: {filter_size} KB)",
+        labels={"value": "Service-rate IOPS"},
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show data"):
+        st.dataframe(df)
+
+    # observed IOPS by disk and IO type (wall-clock time)
+    duration_sec = fdf.groupby(["Disks", "IO Type"]).apply(
+        lambda g: g["Complete Time (s)"].max() - g["Init Time (s)"].min()
+    )
+    duration_sec = duration_sec.where(duration_sec > 0, np.nan)
+    total_ios = fdf.groupby(["Disks", "IO Type"])["Count"].sum()
+    df = total_ios / duration_sec
+    df = df.fillna(0)
+
+    fig = px.bar(
+        df.unstack(),
+        color="IO Type",
+        color_discrete_map=io_type_color_mapping,
+        barmode="group",
+        title=f"Observed IOPS (Wall-clock) (size: {filter_size} KB)",
+        labels={"value": "Observed IOPS"},
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -739,11 +829,12 @@ def show_request_size_histogram(data: pd.DataFrame):
             title=f"Request Size Distribution ({disk_name})",
             labels={"Size (KB)": "Request Size (KB)", "count": "Frequency"},
             opacity=0.7,
+            weights="Count",
         )
 
         fig.update_layout(
             xaxis_title="Request Size (KB)",
-            yaxis_title="Frequency (number of requests)",
+            yaxis_title="Frequency (weighted requests)",
             bargap=0.1,
         )
 
@@ -753,19 +844,25 @@ def show_request_size_histogram(data: pd.DataFrame):
         st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Show statistics"):
-            stats_df = (
-                df.groupby("IO Type")["Size (KB)"]
-                .agg(
-                    [
-                        ("Min", "min"),
-                        ("Max", "max"),
-                        ("Mean", "mean"),
-                        ("Median", "median"),
-                        ("Std Dev", "std"),
-                    ]
+
+            def weighted_stats(g: pd.DataFrame) -> pd.Series:
+                weights = g["Count"]
+                sizes = g["Size (KB)"]
+                mean = (sizes * weights).sum() / weights.sum()
+                median = weighted_quantile(g, "Size (KB)", "Count", 0.5)
+                variance = np.average((sizes - mean) ** 2, weights=weights)
+                std_dev = np.sqrt(variance)
+                return pd.Series(
+                    {
+                        "Min": sizes.min(),
+                        "Max": sizes.max(),
+                        "Mean": mean,
+                        "Median": median,
+                        "Std Dev": std_dev,
+                    }
                 )
-                .round(2)
-            )
+
+            stats_df = df.groupby("IO Type").apply(weighted_stats).round(2)
             st.dataframe(stats_df)
             st.write(
                 "> **Note:** The histogram uses a logarithmic x-axis scale to better visualize "
@@ -777,7 +874,11 @@ def show_request_size_count(data: pd.DataFrame):
     """Show most frequent request size per total request count."""
     # compute average read and write request size in kbytes
     df = (
-        (data.groupby(["Disks", "IO Type"])["Size (B)"].mean() / toKB)
+        (
+            data.groupby(["Disks", "IO Type"]).apply(
+                lambda g: (g["Size (B)"] * g["Count"]).sum() / g["Count"].sum() / toKB
+            )
+        )
         .to_frame()
         .reset_index()
     )
@@ -803,8 +904,8 @@ def show_request_size_count(data: pd.DataFrame):
 
     # Count occurrences of specific "Size (B)"
     length_counts_df = (
-        data.groupby(["Disks", "IO Type"])["Size (B)"]
-        .value_counts()
+        data.groupby(["Disks", "IO Type", "Size (B)"])["Count"]
+        .sum()
         .sort_index()
         .to_frame()
         .reset_index()
@@ -820,7 +921,7 @@ def show_request_size_count(data: pd.DataFrame):
         df.drop(["Disks", "Size (B)"], axis=1, inplace=True)
         # Calculate percentage within each request group
         df["Percent"] = (
-            df["count"] / df.groupby("IO Type")["count"].transform("sum") * 100
+            df["Count"] / df.groupby("IO Type")["Count"].transform("sum") * 100
         )
         # Identify rows to drop
         rows_to_drop = df.index[df["Percent"] < percentage_threshold]
@@ -836,7 +937,7 @@ def show_request_size_count(data: pd.DataFrame):
             barmode="group",
             title=f"Number of Requests Percent per Request Size ({disk_name})",
             text="Percent",
-            custom_data=["IO Type", "Percent", "count"],
+            custom_data=["IO Type", "Percent", "Count"],
         )
         # Annotate the bars with percentage values
         fig.update_xaxes(type="category")
@@ -859,14 +960,14 @@ def show_request_size_bytes(data: pd.DataFrame):
 
     # Count occurrences of specific "Size (B)"
     length_bytes_df = (
-        data.groupby(["Disks", "IO Type"])["Size (B)"]
-        .value_counts()
+        data.groupby(["Disks", "IO Type", "Size (B)"])["Count"]
+        .sum()
         .sort_index()
         .to_frame()
         .reset_index()
     )
     length_bytes_df["Total Size"] = (
-        length_bytes_df["Size (B)"] * length_bytes_df["count"]
+        length_bytes_df["Size (B)"] * length_bytes_df["Count"]
     )
 
     # find the best unit to display the total size by averaging the total size
@@ -899,7 +1000,7 @@ def show_request_size_bytes(data: pd.DataFrame):
             * 100
         )
         # drop unused columns
-        df.drop(["Disks", "Size (B)", "count"], axis=1, inplace=True)
+        df.drop(["Disks", "Size (B)", "Count"], axis=1, inplace=True)
         # Identify rows to drop
         rows_to_drop = df.index[df["Percent"] < percentage_threshold]
         # Drop rows
@@ -944,8 +1045,15 @@ def show_request_size_iops(data: pd.DataFrame):
     for disk_name in sorted(data["Disks"].unique().tolist()):
         df = data[data["Disks"] == disk_name].copy()
         df = (
-            df.groupby(["IO Type", "Size (B)"])["Disk Service Time (µs)"]
-            .agg(total_time="sum", request_count="count")
+            df.groupby(["IO Type", "Size (B)"])
+            .apply(
+                lambda g: pd.Series(
+                    {
+                        "total_time": (g["Disk Service Time (µs)"] * g["Count"]).sum(),
+                        "request_count": g["Count"].sum(),
+                    }
+                )
+            )
             .reset_index()
         )
         # compute iops
@@ -996,11 +1104,8 @@ def show_request_size_time(data: pd.DataFrame):
     for disk_name in sorted(data["Disks"].unique().tolist()):
         df = data[data["Disks"] == disk_name].copy()
         df = (
-            (
-                df.groupby(["IO Type", "Category", "Size (B)"])[
-                    "Disk Service Time (µs)"
-                ].sum()
-            )
+            df.groupby(["IO Type", "Category", "Size (B)"])
+            .apply(lambda g: (g["Disk Service Time (µs)"] * g["Count"]).sum())
             .to_frame()
             .reset_index()
         )
@@ -1124,7 +1229,9 @@ def show_service_time_process(data: pd.DataFrame):
     for disk_name in sorted(data["Disks"].unique().tolist()):
         df = data[data["Disks"] == disk_name].copy()
         df = (
-            df.groupby(["Process Name", "IO Type"])["Disk Service Time (µs)"].sum()
+            df.groupby(["Process Name", "IO Type"]).apply(
+                lambda g: (g["Disk Service Time (µs)"] * g["Count"]).sum()
+            )
         ).to_frame()
 
         # show only the top 10 processes
@@ -1168,11 +1275,22 @@ def show_service_time_process(data: pd.DataFrame):
             st.dataframe(df)
 
 
-def show_queue_depth_info(data: pd.DataFrame):
+def show_queue_depth_info(data: pd.DataFrame, latency_col: str):
     """Show Queue Depth (QD) statistics and charts."""
 
     # 1. Average QD per Disk
-    df_qd_disk = data.groupby("Disks")[["QD/I", "QD/C"]].mean().reset_index()
+    df_qd_disk = (
+        data.groupby("Disks")
+        .apply(
+            lambda g: pd.Series(
+                {
+                    "QD/I": (g["QD/I"] * g["Count"]).sum() / g["Count"].sum(),
+                    "QD/C": (g["QD/C"] * g["Count"]).sum() / g["Count"].sum(),
+                }
+            )
+        )
+        .reset_index()
+    )
 
     fig_qd = px.bar(
         df_qd_disk.melt(
@@ -1209,7 +1327,7 @@ def show_queue_depth_info(data: pd.DataFrame):
         data.groupby(["Disks", "QD_Bin"])
         .apply(
             lambda x: (
-                (x["Disk Service Time (µs)"] * x["Count"]).sum() / x["Count"].sum()
+                (x[latency_col] * x["Count"]).sum() / x["Count"].sum()
                 if x["Count"].sum() > 0
                 else 0
             )
@@ -1223,8 +1341,8 @@ def show_queue_depth_info(data: pd.DataFrame):
         y="Avg Latency (µs)",
         color="Disks",
         markers=True,
-        title="Average Latency vs Queue Depth (QD/C)",
-        labels={"QD_Bin": "Queue Depth Range"},
+        title=f"Average Latency vs Queue Depth (QD/C) [{latency_col}]",
+        labels={"QD_Bin": "Queue Depth Range", "Avg Latency (µs)": latency_col},
     )
     st.plotly_chart(fig_lat_qd, use_container_width=True)
 
@@ -1232,16 +1350,14 @@ def show_queue_depth_info(data: pd.DataFrame):
         st.dataframe(df_lat_qd)
 
 
-def show_qos_analysis(data: pd.DataFrame):
+def show_qos_analysis(data: pd.DataFrame, latency_col: str):
     """Show Quality of Service (QoS) analysis."""
     # Define latency buckets
     # <100us (Excellent), 100-500us (Good), 500us-1ms (Fair), 1-10ms (Poor), >10ms (Bad)
     bins = [0, 100, 500, 1000, 10000, 999999999]
     labels = ["<100µs", "100-500µs", "500µs-1ms", "1-10ms", ">10ms"]
 
-    data["LatencyBucket"] = pd.cut(
-        data["Disk Service Time (µs)"], bins=bins, labels=labels
-    )
+    data["LatencyBucket"] = pd.cut(data[latency_col], bins=bins, labels=labels)
 
     # Calculate percentage of requests in each bucket per disk (Weighted by Count)
     df_qos = (
@@ -1262,7 +1378,7 @@ def show_qos_analysis(data: pd.DataFrame):
         x="Disks",
         y="Percent",
         color="LatencyBucket",
-        title="Latency QoS Distribution (Percentage of I/Os)",
+        title=f"Latency QoS Distribution (Percentage of I/Os) [{latency_col}]",
         color_discrete_map={
             "<100µs": "#00CC96",  # Green
             "100-500µs": "#636EFA",  # Blue
@@ -1322,7 +1438,9 @@ def show_throughput_over_time(data: pd.DataFrame):
 
     # Calculate MB/s per bin (Sum of Size / 1s)
     df_time = (
-        data.groupby(["Disks", "TimeBin", "IO Type"])["Size (B)"].sum().reset_index()
+        data.groupby(["Disks", "TimeBin", "IO Type"])
+        .apply(lambda g: (g["Count"] * g["Size (B)"]).sum())
+        .reset_index(name="Size (B)")
     )
     df_time["Throughput (MB/s)"] = df_time["Size (B)"] / toMB
 
@@ -1549,6 +1667,14 @@ def main():
     show_request_size_time(data)
     show_request_size_bytes(data)
 
+    latency_col = sidebar.radio(
+        "Latency metric:",
+        options=["Disk Service Time (µs)", "IO Time (µs)"],
+        index=0,
+        horizontal=True,
+        help="Disk Service Time excludes queueing; IO Time includes queueing and is closer to end-to-end latency.",
+    )
+
     # Show access time info
     st.header(":stopwatch: Performance Charts")
     with st.expander("Show info"):
@@ -1560,9 +1686,11 @@ def main():
             I don't know why but access time reported by WPR is smaller than the access time measured by other benchmarking apps like CDM or AS SSD.
             """
         )
-    show_performance(data, filter_size)
+    remove_outliers = sidebar.checkbox("Remove latency outliers", value=False)
+    show_performance(
+        data, filter_size, latency_col=latency_col, remove_outliers=remove_outliers
+    )
     show_request_size_iops(data)
-    show_request_size_process(data)
     show_request_size_process(data)
     show_service_time_process(data)
 
@@ -1573,16 +1701,16 @@ def main():
              **Queue Depth (QD)** represents the number of pending I/O requests at a given instant.
              *   **QD/I (Init)**: Queue depth when the request was issued.
              *   **QD/C (Complete)**: Queue depth when the request was completed.
-             
-             Modern NVMe SSDs are designed to handle high parallelism (High QD). 
+
+             Modern NVMe SSDs are designed to handle high parallelism (High QD).
              If latency increases linearly with QD, the drive is saturating.
              """
         )
-    show_queue_depth_info(data)
+    show_queue_depth_info(data, latency_col=latency_col)
 
     st.header(":chart_with_downwards_trend: Advanced Diagnostics")
     st.subheader("1. Quality of Service (Latency QoS)")
-    show_qos_analysis(data)
+    show_qos_analysis(data, latency_col=latency_col)
 
     st.subheader("2. I/O Alignment Analysis")
     show_misalignment_analysis(data)
