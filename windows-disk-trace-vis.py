@@ -20,7 +20,8 @@ History:  v1.0.0 Initial release
           v1.0.11 Renamed graphics title
           v1.0.12 Fixed UnhashableParamError / LargeUtf8
           v1.0.13 Add Queue Depth, QoS, Misalignment, and Throughput over time analysis, and improve latency calculations with weighted quantiles.
-Modified: 20260204
+          v1.0.14 Fix column name in avg. size and avg. service time charts.
+Modified: 20260206
 Usage:
     $ streamlit run windows-disk-trace-vis.py
 """
@@ -642,7 +643,7 @@ def show_performance(
     fig = px.bar(
         df.reset_index(),
         x="Disks",
-        y="Average Throughput (MB/s)",
+        y="Service-rate Throughput (MB/s)",
         color="Disks",
         title="Service-rate Throughput",
         labels={"value": "Service-rate Throughput (MB/s)"},
@@ -883,8 +884,8 @@ def show_request_size_count(data: pd.DataFrame):
         .reset_index()
     )
 
-    # rename the columns
-    df.rename(columns={"Size (B)": "Avg. Size (KB)"}, inplace=True)
+    # rename the columns (groupby apply returns column as 0, not "Size (B)")
+    df.rename(columns={0: "Avg. Size (KB)"}, inplace=True)
 
     # Create Plotly bar plot
     fig = px.bar(
@@ -1110,8 +1111,8 @@ def show_request_size_time(data: pd.DataFrame):
             .reset_index()
         )
 
-        # rename column
-        df.rename(columns={"Disk Service Time (µs)": "Disk Service Time"}, inplace=True)
+        # rename column (groupby apply returns column as 0)
+        df.rename(columns={0: "Disk Service Time"}, inplace=True)
 
         # request size with proper unit
         df["Request Size"] = (
@@ -1234,27 +1235,25 @@ def show_service_time_process(data: pd.DataFrame):
             )
         ).to_frame()
 
-        # show only the top 10 processes
+        # show only the top 10 processes (groupby apply returns column as 0)
         df = (
-            df.sort_values(by=["Disk Service Time (µs)"], ascending=False)
-            .head(top_charts_count)
-            .reset_index()
+            df.sort_values(by=[0], ascending=False).head(top_charts_count).reset_index()
         )
 
         # find the best unit to display the total size by averaging
-        avg = df["Disk Service Time (µs)"].mean()
+        avg = df[0].mean()
         if avg / toSec > 1:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toSec
+            df["Disk Service Time"] = df[0] / toSec
             unit = "s"
         elif avg / toMSec > 1:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"] / toMSec
+            df["Disk Service Time"] = df[0] / toMSec
             unit = "ms"
         else:
-            df["Disk Service Time"] = df["Disk Service Time (µs)"]
+            df["Disk Service Time"] = df[0]
             unit = "µs"
 
         # drop unused columns
-        df.drop(["Disk Service Time (µs)"], axis=1, inplace=True)
+        df.drop([0], axis=1, inplace=True)
 
         fig = px.bar(
             df,
