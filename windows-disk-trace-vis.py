@@ -819,21 +819,21 @@ def show_request_size_histogram(data: pd.DataFrame):
         # Convert size to KB for better readability
         df["Size (KB)"] = df["Size (B)"] / toKB
 
-        # Create histogram with separate traces for Read/Write
-        # Note: using y="Count" with histfunc="sum" for compatibility with older Plotly versions
-        # (the "weights" parameter was added in Plotly 5.10.0)
-        fig = px.histogram(
-            df,
+        # Aggregate counts by size and IO type for the bar chart
+        # (using bar chart instead of histogram since data is pre-aggregated)
+        df_hist = df.groupby(["IO Type", "Size (KB)"])["Count"].sum().reset_index()
+
+        # Create bar chart with separate traces for Read/Write
+        fig = px.bar(
+            df_hist,
             x="Size (KB)",
             y="Count",
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="overlay",
-            nbins=50,
             title=f"Request Size Distribution ({disk_name})",
-            labels={"Size (KB)": "Request Size (KB)", "sum of Count": "Frequency"},
+            labels={"Size (KB)": "Request Size (KB)", "Count": "Frequency"},
             opacity=0.7,
-            histfunc="sum",
         )
 
         fig.update_layout(
@@ -1326,7 +1326,7 @@ def show_queue_depth_info(data: pd.DataFrame, latency_col: str):
     )
 
     df_lat_qd = (
-        data.groupby(["Disks", "QD_Bin"])
+        data.groupby(["Disks", "QD_Bin"], observed=True)
         .apply(
             lambda x: (
                 (x[latency_col] * x["Count"]).sum() / x["Count"].sum()
@@ -1363,7 +1363,7 @@ def show_qos_analysis(data: pd.DataFrame, latency_col: str):
 
     # Calculate percentage of requests in each bucket per disk (Weighted by Count)
     df_qos = (
-        data.groupby(["Disks", "LatencyBucket"])
+        data.groupby(["Disks", "LatencyBucket"], observed=True)
         .apply(lambda x: x["Count"].sum())
         .reset_index(name="Request Count")
     )
