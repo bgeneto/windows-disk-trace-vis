@@ -820,17 +820,20 @@ def show_request_size_histogram(data: pd.DataFrame):
         df["Size (KB)"] = df["Size (B)"] / toKB
 
         # Create histogram with separate traces for Read/Write
+        # Note: using y="Count" with histfunc="sum" for compatibility with older Plotly versions
+        # (the "weights" parameter was added in Plotly 5.10.0)
         fig = px.histogram(
             df,
             x="Size (KB)",
+            y="Count",
             color="IO Type",
             color_discrete_map=io_type_color_mapping,
             barmode="overlay",
             nbins=50,
             title=f"Request Size Distribution ({disk_name})",
-            labels={"Size (KB)": "Request Size (KB)", "count": "Frequency"},
+            labels={"Size (KB)": "Request Size (KB)", "sum of Count": "Frequency"},
             opacity=0.7,
-            weights="Count",
+            histfunc="sum",
         )
 
         fig.update_layout(
